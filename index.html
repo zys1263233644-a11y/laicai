@@ -81,6 +81,9 @@
 .listing-desc{margin:0 0 8px;font-size:12px;line-height:1.7;color:var(--ink)}
 .listing-tags span{display:inline-block;background:var(--paper);border-radius:999px;padding:2px 8px;font-size:11px;margin:0 4px 4px 0;color:var(--muted)}
 @media (max-width:640px){.market-tiers{grid-template-columns:1fr}.market-hold{grid-template-columns:repeat(2,1fr)}}
+.text-button{margin-left:8px;border:1px solid var(--line);background:var(--white);color:var(--green);border-radius:999px;padding:2px 10px;font-size:11px;cursor:pointer}
+.text-button:hover{background:var(--paper)}
+.ai-note{background:#f3f6ee;border-left:2px solid var(--green);padding:8px 10px;border-radius:6px;font-size:12px;line-height:1.7;margin:10px 0 0;color:var(--ink)}
 .market-deal{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
 .market-deal>div{border:1px solid var(--line);border-radius:12px;padding:14px;background:#fbfcf8}
 .market-deal small{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}
@@ -94,6 +97,9 @@
 .market-advice h3{margin:0 0 8px;font-size:16px;color:var(--green)}
 .market-advice p{margin:0 0 6px;font-size:12px;line-height:1.7;color:var(--ink)}
 @media(max-width:760px){.market-deal{grid-template-columns:1fr}}
+
+.ai-note.loading{display:flex;align-items:center;gap:8px;color:var(--muted)}
+.ai-note.loading .spinner{width:12px;height:12px}
 
 </style>
 </head>
@@ -1402,6 +1408,128 @@ function normalizeListing(payload) {
   };
 }
 
+
+/** 允许出现在文案里的数字（元），用于事后校验，防止模型编价格 */
+function allowedNumbers(price, hold) {
+  const out = new Set();
+  const add = (v) => { if (Number.isFinite(v)) out.add(Math.round(v)); };
+  const p = price || {};
+  const t = p.tiers || {};
+  add(t.fast); add(t.fair); add(t.patient); add(p.listPrice); add(p.floor); add(p.base); add(p.p25); add(p.p75);
+  if (Number.isFinite(p.buffer)) add(p.buffer * 100);
+  if (Number.isFinite(p.factor)) add(p.factor * 100);
+  const h = hold || {};
+  if (h.current != null) add(h.current / 100);
+  if (h.daily != null) add(h.daily / 100);
+  if (h.burn30 != null) add(h.burn30 / 100);
+  if (h.ratio != null) add(h.ratio * 100);
+  add(h.days);
+  return [...out];
+}
+
+/** 一次调用同时产出：定价解读、持有成本解读、转卖文案 */
+function buildAdvicePrompt(asset, ctx = {}) {
+  const price = ctx.price || {};
+  const tiers = price.tiers || {};
+  const hold = ctx.hold || {};
+  const yuan = (cents) => (Number.isFinite(cents) ? Math.round(cents / 100) : null);
+  const flags = [];
+  if (ctx.fullBox) flags.push('全套配件');
+  if (ctx.warranty) flags.push('仍在保修期');
+  if (ctx.invoice) flags.push('有发票');
+
+  return [
+    '你是二手交易顾问兼文案撰写者。请只根据下面的数字写作，不得引入任何新的价格数字，也不得编造未提供的功能或成色。',
+    '',
+    '商品：' + (asset.name || ''),
+    '成色：' + conditionLabel(ctx.condition || '95'),
+    '附加：' + (flags.join('、') || '无'),
+    '购入价：' + (yuan(asset.price) != null ? yuan(asset.price) : '未知') + ' 元',
+    '购入日期：' + (asset.date || '未知'),
+    '备注：' + (asset.note || '无'),
+    '',
+    '定价计算（单位：元）：',
+    '基准价 ' + (price.base != null ? price.base : '未知') + '，成色系数 ' + (price.factor != null ? price.factor : '未知'),
+    '快速出手 ' + (tiers.fast != null ? tiers.fast : '未知') + '，合理 ' + (tiers.fair != null ? tiers.fair : '未知') + '，耐心 ' + (tiers.patient != null ? tiers.patient : '未知'),
+    '建议挂牌 ' + (price.listPrice != null ? price.listPrice : '未知') + '，议价缓冲 ' + (price.buffer != null ? Math.round(price.buffer * 100) + '%' : '未知'),
+    '价格下限 ' + (price.floor != null ? price.floor : '未提供'),
+    '',
+    '持有情况：',
+    '持有天数 ' + (hold.days != null ? hold.days : '未知'),
+    '当前市值 ' + (hold.current != null ? yuan(hold.current) : '未知') + ' 元',
+    '保值率 ' + (hold.ratio != null ? Math.round(hold.ratio * 100) + '%' : '未知'),
+    '日均成本 ' + (hold.daily != null ? (hold.daily / 100).toFixed(2) : '未知') + ' 元',
+    '再持有 30 天预计再贬 ' + (hold.burn30 != null ? yuan(hold.burn30) : '未知') + ' 元',
+    '',
+    '输出 JSON，不要任何解释：',
+    '{"pricing":"40字以内：定价逻辑","holding":"40字以内：持有成本说明","action":"sell|wait|hold","risks":["..."],"listing":{"title":"30字内","description":"80-160字","tags":["..."]}}',
+    '',
+    '规则：',
+    '1. 只能使用上面出现过的数字，不得自行计算新的价格。',
+    '2. pricing 讲定价逻辑，holding 讲持有成本，不要重复。',
+    '3. action 三选一：sell 建议出手，wait 再等等，hold 继续持有。',
+    '4. listing.title 含型号与成色，不超过 30 字；description 3-4 句，不写价格；tags 3-5 个。',
+    '5. 不得出现“全新”“无任何瑕疵”等未经确认的表述。',
+    '6. risks 最多 2 条，只写数据不足这类真实风险。'
+  ].join('\n');
+}
+
+function buildAdviceMessages(asset, ctx = {}) {
+  return [
+    {role: 'system', content: buildAdvicePrompt(asset, ctx)},
+    {role: 'user', content: '请输出 JSON。'}
+  ];
+}
+
+function numbersIn(text) {
+  const out = [];
+  const re = /(?:[¥￥]\s*)?(\d+(?:\.\d+)?)/g;
+  let m;
+  while ((m = re.exec(String(text || ''))) !== null) {
+    const v = Number(m[1]);
+    if (Number.isFinite(v)) out.push(v);
+  }
+  return out;
+}
+
+function normalizeListingPart(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const title = String(src.title || '').trim();
+  const description = String(src.description || '').trim();
+  const tags = Array.isArray(src.tags) ? src.tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 5) : [];
+  if (!title || !description) return null;
+  return {title: title.slice(0, 30), description: description.slice(0, 200), tags};
+}
+
+/** 校验：文中出现的数字必须来自允许集合（±1 容差） */
+function normalizeAdviceText(payload, allowed = []) {
+  const src = payload && typeof payload === 'object' ? payload : {};
+  const pricing = String(src.pricing || '').trim();
+  const holding = String(src.holding || '').trim();
+  const listing = normalizeListingPart(src.listing);
+  if (!pricing && !holding && !listing) return {ok: false, reason: '模型没有给出解读'};
+
+  const set = allowed.map(Number).filter(Number.isFinite);
+  const stray = [];
+  for (const text of [pricing, holding]) {
+    for (const n of numbersIn(text)) {
+      if (!set.some((a) => Math.abs(a - n) <= 1)) stray.push(n);
+    }
+  }
+
+  const action = ['sell', 'wait', 'hold'].includes(src.action) ? src.action : 'wait';
+  const risks = Array.isArray(src.risks) ? src.risks.map(String).slice(0, 2) : [];
+  return {
+    ok: true,
+    pricing: pricing.slice(0, 80),
+    holding: holding.slice(0, 80),
+    listing,
+    action,
+    risks,
+    unverified: [...new Set(stray)].slice(0, 3)
+  };
+}
+
 /**
  * 云服务配置。publishableKey 是「可公开」的密钥，用于标识应用；
  * 真正的鉴权由手机号验证码 + 行级安全（RLS）完成。
@@ -2013,7 +2141,7 @@ function apiBase(){
 async function openAssetMarket(id){
   const asset=state.assets.find(x=>x.id===id);
   if(!asset)return;
-  marketState={assetId:id,keyword:asset.name,data:null,error:'',loading:true,advice:null,adviceError:'',condition:'95',fullBox:false,warranty:false,invoice:false,listing:null,listingError:'',listingLoading:false};
+  marketState={assetId:id,keyword:asset.name,data:null,error:'',loading:true,advice:null,adviceError:'',condition:'95',fullBox:false,warranty:false,invoice:false,listing:null,listingError:'',listingLoading:false,report:null,reportLoading:false,reportError:'',reportSeq:0};
   openModal('市场行情与转卖建议',esc(asset.name)+' · 数据来自转转二手',marketMarkup(asset));
   renderMarketPanel();
   await queryMarket();
@@ -2030,7 +2158,9 @@ async function queryMarket(){
     if(!body.ok)throw Error(body.error||'行情查询失败');
     marketState.data=body.data;
     marketState.loading=false;
+    marketState.report=null;
     renderMarketPanel();
+    generateReport();
   }catch(err){
     marketState.loading=false;
     const where=(typeof location!=='undefined'&&location.protocol==='file:')
@@ -2044,31 +2174,53 @@ function marketToolsMarkup(d,st,deal,asset,m){
   const adv=priceAdvice(d,{condition:m.condition||'95',fullBox:m.fullBox,warranty:m.warranty,invoice:m.invoice});
   const midYuan=st.median!=null?st.median:((deal.min!=null&&deal.max!=null)?Math.round((deal.min+deal.max)/2):null);
   const hold=holdingStats(asset,midYuan);
+  const rep=m.report||null;
+  const loading=!!m.reportLoading;
+  const aiReady=visionReady(visionCfg);
   const condOptions=CONDITIONS.map(c=>`<option value="${c.id}"${(m.condition||'95')===c.id?' selected':''}>${c.label}</option>`).join('');
   const pricing=adv.ok?`<div class="market-tiers"><div><small>快速出手</small><strong>¥${adv.tiers.fast}</strong></div><div><small>合理价位</small><strong>¥${adv.tiers.fair}</strong></div><div><small>耐心等</small><strong>¥${adv.tiers.patient}</strong></div></div><p class="market-listprice">建议挂牌 <strong>¥${adv.listPrice}</strong>，预留 ${Math.round(adv.buffer*100)}% 议价空间${adv.floor!=null?' · 不低于回收价 ¥'+adv.floor:''}</p>${adv.notes.length?`<p class="panel-note">${esc(adv.notes.join('；'))}</p>`:''}`:`<div class="notice amber">${icon('info',15)}${esc(adv.reason)}</div>`;
   const holdMarkup=(hold&&hold.ratio!=null)?`<div class="market-hold"><div><small>购入</small><strong>¥${Math.round(asset.price/100)}</strong></div><div><small>持有</small><strong>${hold.days} 天</strong></div><div><small>现在约</small><strong>¥${Math.round(hold.current/100)}</strong></div><div><small>保值率</small><strong>${Math.round(hold.ratio*100)}%</strong></div><div><small>日均成本</small><strong>${hold.days>=7?'¥'+(hold.daily/100).toFixed(2):'—'}</strong></div></div><p class="panel-note">按当前在售中位价估算；再放 30 天，预计再贬约 ¥${Math.round(hold.burn30/100)}。</p>`:`<p class="panel-note">缺少购入价或市场价，暂无法估算持有成本。</p>`;
-  const listing=m.listing?`<div class="market-listing"><p class="listing-title">${esc(m.listing.title)}</p><p class="listing-desc">${esc(m.listing.description)}</p><p class="listing-tags">${m.listing.tags.map(t=>`<span>${esc(t)}</span>`).join('')}</p><div class="form-actions"><button class="button" data-action="market-listing-copy">复制文案</button></div></div>`:'';
-  return `<div class="market-tools"><section class="market-block"><h3>挂牌价建议</h3><div class="market-flags"><label>成色<select data-market-field="condition">${condOptions}</select></label><label><input type="checkbox" data-market-flag="fullBox"${m.fullBox?' checked':''}>全套配件</label><label><input type="checkbox" data-market-flag="warranty"${m.warranty?' checked':''}>在保</label><label><input type="checkbox" data-market-flag="invoice"${m.invoice?' checked':''}>有发票</label></div>${pricing}</section><section class="market-block"><h3>持有成本</h3>${holdMarkup}</section><section class="market-block"><h3>转卖文案</h3>${visionReady(visionCfg)?`<div class="form-actions"><button class="button" data-action="market-listing">${m.listingLoading?'生成中…':'生成文案'}</button></div>`:'<p class="panel-note">需要先在设置里配置 AI。</p>'}${m.listingError?`<div class="notice amber">${icon('info',15)}${esc(m.listingError)}</div>`:''}${listing}</section></div>`;
+  const skeleton=t=>`<p class="ai-note loading"><span class="spinner" aria-hidden="true"></span>${t}</p>`;
+  const needAI=`<p class="panel-note">在设置里配置 AI 后，这里会自动生成。</p>`;
+  const pricingAI=rep&&rep.pricing?`<p class="ai-note">${esc(rep.pricing)}</p>`:(loading?skeleton('AI 正在写定价解读…'):(aiReady?'':needAI));
+  const holdingAI=(rep&&rep.holding?`<p class="ai-note">${esc(rep.holding)}</p>`:(loading?skeleton('AI 正在分析持有成本…'):(aiReady?'':needAI)))
+    +(rep?`<p class="panel-note">AI 判断：${rep.action==='sell'?'建议出手':rep.action==='hold'?'继续持有':'再等等'}${rep.risks.length?' · '+esc(rep.risks.join('；')):''}</p>`:'')
+    +((rep&&rep.unverified&&rep.unverified.length)?`<div class="notice amber">文中出现了参考数据之外的数字（${rep.unverified.join('、')}），请以上方表格为准。</div>`:'')
+    +(m.reportError?`<div class="notice amber">${icon('info',15)}${esc(m.reportError)}</div>`:'')
+    +(loading?skeleton('AI 正在写转卖文案…'):'');
+  const listingMarkup=rep&&rep.listing?`<div class="market-listing"><p class="listing-title">${esc(rep.listing.title)}</p><p class="listing-desc">${esc(rep.listing.description)}</p><p class="listing-tags">${rep.listing.tags.map(t=>`<span>${esc(t)}</span>`).join('')}</p><div class="form-actions"><button class="button" data-action="market-listing-copy">复制文案</button></div></div>`:'<p class="panel-note">暂无文案。</p>';
+  return `<div class="market-tools"><section class="market-block"><h3>挂牌价建议</h3><div class="market-flags"><label>成色<select data-market-field="condition">${condOptions}</select></label><label><input type="checkbox" data-market-flag="fullBox"${m.fullBox?' checked':''}>全套配件</label><label><input type="checkbox" data-market-flag="warranty"${m.warranty?' checked':''}>在保</label><label><input type="checkbox" data-market-flag="invoice"${m.invoice?' checked':''}>有发票</label></div>${pricing}${pricingAI}</section><section class="market-block"><h3>持有成本</h3>${holdMarkup}${holdingAI}</section><section class="market-block"><h3>转卖文案</h3>${listingMarkup}</section></div>`;
 }
-async function askListingText(){
-  if(!marketState||!marketState.data){toast('请先查询行情');return;}
-  if(!visionReady(visionCfg)){toast('需要先配置 AI（设置 → AI 识图）');return;}
-  const asset=state.assets.find(x=>x.id===marketState.assetId);
-  if(!asset)return;
-  const adv=priceAdvice(marketState.data,{condition:marketState.condition,fullBox:marketState.fullBox,warranty:marketState.warranty,invoice:marketState.invoice});
-  marketState.listingLoading=true;marketState.listingError='';
+async function generateReport(){
+  if(!marketState||!marketState.data)return;
+  if(!visionReady(visionCfg)){marketState.reportLoading=false;marketState.report=null;renderMarketPanel();return;}
+  const seq=(marketState.reportSeq||0)+1;
+  marketState.reportSeq=seq;
+  const asset=state.assets.find(x=>x.id===marketState.assetId)||{};
+  const d=marketState.data,st=d.listings.stats||{},deal=d.deal||{};
+  const adv=priceAdvice(d,{condition:marketState.condition,fullBox:marketState.fullBox,warranty:marketState.warranty,invoice:marketState.invoice});
+  const midYuan=st.median!=null?st.median:((deal.min!=null&&deal.max!=null)?Math.round((deal.min+deal.max)/2):null);
+  const hold=holdingStats(asset,midYuan);
+  marketState.reportLoading=true;marketState.reportError='';
   renderMarketPanel();
   try{
-    const payload=await callChat(buildListingMessages(asset,{...marketState,advice:adv}),visionTuning(visionCfg));
-    const res=normalizeListing(payload);
-    if(!res.ok)throw Error(res.reason||'文案生成失败');
-    marketState.listing=res;
+    const payload=await callChat(buildAdviceMessages(asset,{condition:marketState.condition,fullBox:marketState.fullBox,warranty:marketState.warranty,invoice:marketState.invoice,price:adv,hold,snapshot:d}),visionTuning(visionCfg));
+    if(seq!==marketState.reportSeq)return;
+    const res=normalizeAdviceText(payload,allowedNumbers(adv,hold));
+    if(!res.ok)throw Error(res.reason||'解读失败');
+    marketState.report=res;
   }catch(err){
-    marketState.listingError=err&&err.message?err.message:'文案生成失败';
+    if(seq!==marketState.reportSeq)return;
+    marketState.reportError=err&&err.message?err.message:'解读失败';
   }finally{
-    marketState.listingLoading=false;
-    renderMarketPanel();
+    if(seq===marketState.reportSeq){marketState.reportLoading=false;renderMarketPanel();}
   }
+}
+let reportTimer=null;
+function scheduleReport(){
+  if(!marketState||!marketState.data)return;
+  clearTimeout(reportTimer);
+  reportTimer=setTimeout(()=>{marketState.report=null;generateReport();},700);
 }
 function copyListingText(){
   const l=marketState&&marketState.listing;
@@ -2081,9 +2233,9 @@ function copyListingText(){
 document.addEventListener('change',e=>{
   if(!marketState)return;
   const f=e.target.closest('[data-market-field]');
-  if(f){marketState[f.dataset.marketField]=f.value;renderMarketPanel();return;}
+  if(f){marketState[f.dataset.marketField]=f.value;renderMarketPanel();scheduleReport();return;}
   const c=e.target.closest('[data-market-flag]');
-  if(c){marketState[c.dataset.marketFlag]=c.checked;renderMarketPanel();}
+  if(c){marketState[c.dataset.marketFlag]=c.checked;renderMarketPanel();scheduleReport();}
 });
 async function askResaleAdvice(){
   if(!marketState||!marketState.data){toast('请先查询行情');return;}
@@ -2131,7 +2283,7 @@ function download(name,content,type){const url=URL.createObjectURL(new Blob([con
 function exportCSV(){const cell=v=>'"'+String(v).replace(/^[=+@\-\t\r]/,"'$&").replaceAll('"','""')+'"';const rows=[['日期','交易名称','收支类型','分类','金额（元）','币种','备注'],...[...state.transactions].sort(sortTx).map(t=>[t.date,t.title,t.type==='income'?'收入':'支出',t.category,(t.amount/100).toFixed(2),'CNY',t.note])];download(`来财账本-${today()}.csv`,'\uFEFF'+rows.map(r=>r.map(cell).join(',')).join('\r\n'),'text/csv;charset=utf-8');}
 function parseAndRender(){try{const text=$('#natural-text').value;parsed=parseText(text);if(!parsed.length){$('#parse-results').innerHTML='<div class="notice amber" style="margin-top:20px">没有找到可确认的记录。试试“午饭28元，打车35元”，也可切换手动输入。</div>';return;}$('#parse-results').innerHTML=draftForm(parsed,'本地规则 · 非 AI',`已生成 ${parsed.length} 条草稿。规则可能遗漏信息，请核对原文和金额；无法解析的部分不会入账。`);}catch(e){toast(e.message);}}
 function startVoice(){if(recognition){recognition.stop();recognition=null;return;}const Speech=window.SpeechRecognition||window.webkitSpeechRecognition;if(!Speech){$('#voice-hint').textContent='当前浏览器不支持语音输入，请在下方直接输入文字。';return;}try{recognition=new Speech();recognition.lang='zh-CN';recognition.interimResults=false;recognition.continuous=false;recognition.onstart=()=>{$('.voice-button')?.classList.add('listening');if($('#voice-hint'))$('#voice-hint').textContent='正在聆听…再点一次停止';};recognition.onresult=e=>{if($('#natural-text'))$('#natural-text').value+=e.results[0][0].transcript;};recognition.onerror=e=>{if($('#voice-hint'))$('#voice-hint').textContent=e.error==='not-allowed'?'麦克风权限未获准，请使用文字输入。':'语音服务暂不可用，请直接输入文字。';};recognition.onend=()=>{recognition=null;$('.voice-button')?.classList.remove('listening');if($('#voice-hint')?.textContent.includes('聆听'))$('#voice-hint').textContent='录音结束，请核对文字并生成待确认记录';};recognition.start();}catch{recognition=null;toast('语音服务不可用，可以直接输入文字');}}
-document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'market-listing':askListingText();break;case 'market-listing-copy':copyListingText();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
+document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'market-listing-copy':copyListingText();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
 case 'account':openAccountEntry();break;
 case 'login':loginModal();break;
 case 'send-code':doSendCode();break;

@@ -60,6 +60,27 @@
 /* ---- 二手行情与转卖建议 ---- */
 .market-modal .field{margin-bottom:12px}
 .market-panel{margin-top:6px}
+.market-tools{display:grid;gap:12px;margin-top:14px}
+.market-block{border:1px solid var(--line);border-radius:12px;padding:14px;background:#fbfcf8}
+.market-block h3{font-size:13px;margin:0 0 10px;color:var(--ink)}
+.market-flags{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;margin-bottom:10px;align-items:center}
+.market-flags label{display:inline-flex;align-items:center;gap:6px;color:var(--muted)}
+.market-flags select{padding:4px 8px;border-radius:8px;border:1px solid var(--line);background:var(--white);color:var(--ink)}
+.market-tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.market-tiers>div{background:var(--paper);border-radius:10px;padding:10px}
+.market-tiers small{display:block;color:var(--muted);font-size:10px;margin-bottom:4px}
+.market-tiers strong{font-size:17px;font-variant-numeric:tabular-nums}
+.market-listprice{margin:10px 0 0;font-size:12px;color:var(--muted)}
+.market-listprice strong{color:var(--ink);font-size:14px}
+.market-hold{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.market-hold>div{background:var(--paper);border-radius:10px;padding:8px}
+.market-hold small{display:block;color:var(--muted);font-size:10px;margin-bottom:3px}
+.market-hold strong{font-size:13px;font-variant-numeric:tabular-nums}
+.market-listing{margin-top:10px;border:1px dashed var(--line);border-radius:10px;padding:12px;background:var(--white)}
+.listing-title{font-weight:600;margin:0 0 6px;font-size:13px}
+.listing-desc{margin:0 0 8px;font-size:12px;line-height:1.7;color:var(--ink)}
+.listing-tags span{display:inline-block;background:var(--paper);border-radius:999px;padding:2px 8px;font-size:11px;margin:0 4px 4px 0;color:var(--muted)}
+@media (max-width:640px){.market-tiers{grid-template-columns:1fr}.market-hold{grid-template-columns:repeat(2,1fr)}}
 .market-deal{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
 .market-deal>div{border:1px solid var(--line);border-radius:12px;padding:14px;background:#fbfcf8}
 .market-deal small{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}
@@ -1093,10 +1114,24 @@ function buildSnapshot({keyword, marketText, items, source = 'zhuanzhuan', fetch
 
 
 
+/** 优先用成交区间；没有时退回在售样本的 P25–P75，并标明来源 */
+function refRange(snapshot) {
+  const deal = (snapshot && snapshot.deal) || {};
+  const stats = (snapshot && snapshot.listings && snapshot.listings.stats) || {};
+  if (Number.isFinite(deal.min) && Number.isFinite(deal.max)) {
+    return {min: deal.min, max: deal.max, source: 'deal'};
+  }
+  if (Number.isFinite(stats.p25) && Number.isFinite(stats.p75)) {
+    return {min: stats.p25, max: stats.p75, source: 'listings'};
+  }
+  return {min: null, max: null, source: 'none'};
+}
+
 /** 只允许引用给定数字，避免模型编造行情 */
 function buildResalePrompt(asset, snapshot, at = today()) {
   const deal = snapshot && snapshot.deal ? snapshot.deal : {};
   const stats = snapshot && snapshot.listings && snapshot.listings.stats ? snapshot.listings.stats : {};
+  const ref = refRange(snapshot);
   const lines = [
     '你是二手转卖顾问。请只依据下面提供的数据给建议，不要编造任何行情数字。',
     '',
@@ -1107,7 +1142,7 @@ function buildResalePrompt(asset, snapshot, at = today()) {
     '折旧估值：' + Math.round(asset.appraisal || 0) + ' 元',
     '',
     '转转行情（' + at + '）：',
-    '成交区间：' + (deal.min != null ? deal.min : '未知') + ' - ' + (deal.max != null ? deal.max : '未知') + ' 元',
+    (ref.source === 'deal' ? '成交区间：' : '参考区间（无成交价，按在售样本推算）：') + (ref.min != null ? ref.min : '未知') + ' - ' + (ref.max != null ? ref.max : '未知') + ' 元',
     '在售样本：' + (stats.count || 0) + ' 件',
     '在售价 中位：' + (stats.median != null ? stats.median : '未知') + ' 元' +
       '，P25：' + (stats.p25 != null ? stats.p25 : '未知') +
@@ -1117,7 +1152,7 @@ function buildResalePrompt(asset, snapshot, at = today()) {
     '{"suggestedPrice":{"low":数字,"high":数字},"timing":"now|wait|hold","reason":"60字以内","risks":["..."]}',
     '',
     '规则：',
-    '1. 建议价必须落在成交区间内；区间未知时输出 null，并在 reason 里说明数据不足。',
+    '1. 建议价必须落在上面给出的区间内；区间未知时输出 null，并在 reason 里说明数据不足。',
     '2. 样本少于 5 件时，必须在 risks 里写「样本偏少」。',
     '3. timing 只能三选一：now 现在卖，wait 再等等，hold 先留着。',
     '4. reason 必须引用上面的具体数字，不要空泛。'
@@ -1147,17 +1182,18 @@ function normalizeAdvice(payload, snapshot) {
   }
   if (low > high) [low, high] = [high, low];
 
-  if (Number.isFinite(deal.min) && Number.isFinite(deal.max)) {
-    const clampedLow = Math.max(deal.min, Math.min(deal.max, low));
-    const clampedHigh = Math.max(deal.min, Math.min(deal.max, high));
+  const ref = refRange(snapshot);
+  if (ref.source !== 'none') {
+    const clampedLow = Math.max(ref.min, Math.min(ref.max, low));
+    const clampedHigh = Math.max(ref.min, Math.min(ref.max, high));
     if (clampedLow !== low || clampedHigh !== high) {
       fixed = true;
-      risks.push('建议价已按成交区间 ¥' + deal.min + '–' + deal.max + ' 修正');
+      risks.push('建议价已按' + (ref.source === 'deal' ? '成交区间' : '样本参考区间') + ' ¥' + ref.min + '–' + ref.max + ' 修正');
       low = clampedLow;
       high = clampedHigh;
     }
   } else {
-    risks.push('缺少成交区间，建议价仅供参考');
+    risks.push('缺少行情区间，建议价仅供参考');
   }
   if ((stats.count || 0) < 5) risks.push('样本偏少（' + (stats.count || 0) + ' 件）');
 
@@ -1173,6 +1209,198 @@ function normalizeAdvice(payload, snapshot) {
   };
 }
 
+
+/** 成色档位：把「同款在售中位」换算到该成色的合理价 */
+const CONDITIONS = [
+  {id: '99', label: '99新', factor: 1.05},
+  {id: '95', label: '95新', factor: 1.00},
+  {id: '90', label: '9成新', factor: 0.92},
+  {id: '80', label: '8成新', factor: 0.85},
+  {id: '70', label: '7成新', factor: 0.75}
+];
+
+function conditionFactor(id) {
+  const hit = CONDITIONS.find(c => c.id === String(id));
+  return hit ? hit.factor : 1;
+}
+
+function conditionLabel(id) {
+  const hit = CONDITIONS.find(c => c.id === String(id));
+  return hit ? hit.label : '95新';
+}
+
+/** 配件与保修加成，合计上限 6% */
+function bonusFor(flags = {}) {
+  let b = 0;
+  if (flags.fullBox) b += 0.03;
+  if (flags.warranty) b += 0.02;
+  if (flags.invoice) b += 0.01;
+  return Math.min(0.06, Math.round(b * 100) / 100);
+}
+
+/** 市场基准价：优先在售中位，其次成交中值 */
+function marketBase(snapshot) {
+  const st = (snapshot && snapshot.listings && snapshot.listings.stats) || {};
+  const deal = (snapshot && snapshot.deal) || {};
+  if (Number.isFinite(st.median)) return st.median;
+  if (Number.isFinite(deal.min) && Number.isFinite(deal.max)) return Math.round((deal.min + deal.max) / 2);
+  return null;
+}
+
+/** 砍价缓冲：样本多且集中→贴紧；样本少或分散→留空间 */
+function bargainBuffer(snapshot) {
+  const st = (snapshot && snapshot.listings && snapshot.listings.stats) || {};
+  const count = st.count || 0;
+  const spread = (Number.isFinite(st.p25) && Number.isFinite(st.p75) && st.p25 > 0)
+    ? (st.p75 - st.p25) / st.p25
+    : 1;
+  if (count >= 20 && spread <= 0.35) return 0.05;
+  if (count >= 8) return 0.08;
+  return 0.10;
+}
+
+/**
+ * 三档挂牌建议
+ * opts: {condition, fullBox, warranty, invoice, recycle}
+ */
+function priceAdvice(snapshot, opts = {}) {
+  const factor = conditionFactor(opts.condition || '95');
+  const bonus = bonusFor(opts);
+  const st = (snapshot && snapshot.listings && snapshot.listings.stats) || {};
+  const deal = (snapshot && snapshot.deal) || {};
+  const base = marketBase(snapshot);
+  const notes = [];
+
+  if (base == null) return {ok: false, reason: '没有可用的市场价', notes};
+
+  const adj = (v) => Math.round(v * factor * (1 + bonus));
+  const p25 = Number.isFinite(st.p25) ? st.p25 : base;
+  const p75 = Number.isFinite(st.p75) ? st.p75 : base;
+  let fast = adj(p25);
+  let fair = adj(base);
+  let patient = adj(p75);
+  fast = Math.min(fast, fair);
+  patient = Math.max(patient, fair);
+
+  const floor = Number.isFinite(opts.recycle)
+    ? opts.recycle
+    : (Number.isFinite(deal.min) ? deal.min : null);
+
+  if (floor != null && patient < floor) notes.push('市场价已低于回收价，直接回收更划算');
+  if ((st.count || 0) < 5) notes.push('在售样本偏少，价格参考性一般');
+  if (!Number.isFinite(st.median)) notes.push('缺少在售中位价，改用成交中值估算');
+  if (bonus > 0) notes.push('已按配件/保修加成 ' + Math.round(bonus * 100) + '%');
+
+  const buffer = bargainBuffer(snapshot);
+  return {
+    ok: true,
+    base,
+    factor,
+    bonus,
+    buffer,
+    floor,
+    p25,
+    p75,
+    tiers: {fast, fair, patient},
+    listPrice: Math.round(fair * (1 + buffer)),
+    notes
+  };
+}
+
+
+/**
+ * 持有成本：基于购入价与当前市场价
+ * marketPrice 单位为元（与行情接口一致），asset.price 为分
+ */
+function holdingStats(asset, marketPriceYuan, at = today()) {
+  if (!asset || !Number.isFinite(asset.price) || asset.price <= 0) return null;
+  if (asset.status === '已售出' || asset.status === '已回收') return null;
+
+  const days = Math.max(1, daysBetween(asset.date, at));
+  const current = Number.isFinite(marketPriceYuan) && marketPriceYuan > 0
+    ? Math.round(marketPriceYuan * 100)
+    : null;
+
+  const life = Math.max(1, Number(asset.life) || 3) * 365;
+  const residual = Number(asset.residual) || 0;
+  const perDayDep = (asset.price - residual) / life;
+
+  if (current == null) {
+    return {days, current: null, ratio: null, cost: null, daily: null, burn30: Math.round(perDayDep * 30)};
+  }
+
+  const cost = Math.max(0, asset.price - current);
+  return {
+    days,
+    current,
+    ratio: current / asset.price,
+    cost,
+    daily: cost / days,
+    burn30: Math.round(perDayDep * 30)
+  };
+}
+
+
+/** 生成转卖文案：只允许使用给定事实，不许编造 */
+function buildListingPrompt(asset, ctx = {}) {
+  const advice = ctx.advice || {};
+  const tiers = advice.tiers || {};
+  const flags = [];
+  if (ctx.fullBox) flags.push('全套配件');
+  if (ctx.warranty) flags.push('仍在保修期');
+  if (ctx.invoice) flags.push('有发票');
+
+  return [
+    '你是二手交易文案撰写者。请根据给定事实写一则转转风格的商品信息，不要编造未提供的功能、状态或瑕疵。',
+    '',
+    '商品：' + (asset.name || ''),
+    '成色：' + conditionLabel(ctx.condition || '95'),
+    '购入价：' + Math.round((asset.price || 0) / 100) + ' 元',
+    '购入时间：' + (asset.date || ''),
+    '备注：' + (asset.note || '无'),
+    '附加：' + (flags.join('、') || '无'),
+    '',
+    '市场参考（不要写进正文的价格区间）：',
+    '建议挂牌：' + (advice.listPrice != null ? advice.listPrice : '未知') + ' 元',
+    '快速出手价：' + (tiers.fast != null ? tiers.fast : '未知') + ' 元',
+    '',
+    '输出 JSON，不要任何解释：',
+    '{"title":"30字以内标题","description":"80-160字描述","tags":["标签1","标签2","标签3"]}',
+    '',
+    '规则：',
+    '1. 标题含型号与成色，突出一个卖点，不超过 30 字。',
+    '2. 描述 3-4 句：成色、使用时长、配件情况、交易方式，不写价格。',
+    '3. 不许出现"全新""无任何瑕疵"等未经确认的表述。',
+    '4. 标签 3-5 个，来自商品本身，不堆砌无关词。'
+  ].join('\n');
+}
+
+function buildListingMessages(asset, ctx = {}) {
+  return [
+    {role: 'system', content: buildListingPrompt(asset, ctx)},
+    {role: 'user', content: '请按规则输出 JSON。'}
+  ];
+}
+
+/** 校验并收敛模型输出 */
+function normalizeListing(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {};
+  const title = String(src.title || '').trim();
+  const description = String(src.description || '').trim();
+  const tags = Array.isArray(src.tags)
+    ? src.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 5)
+    : [];
+
+  if (!title) return {ok: false, reason: '模型没有给出标题'};
+  if (!description) return {ok: false, reason: '模型没有给出描述'};
+
+  return {
+    ok: true,
+    title: title.slice(0, 30),
+    description: description.slice(0, 200),
+    tags
+  };
+}
 
 /**
  * 云服务配置。publishableKey 是「可公开」的密钥，用于标识应用；
@@ -1768,9 +1996,14 @@ function renderMarketPanel(){
   if(!d){el.innerHTML='';return;}
   const st=d.listings.stats||{};
   const deal=d.deal||{};
-  const range=(deal.min!=null&&deal.max!=null)?('¥'+deal.min+' – ¥'+deal.max):'未获取到成交区间';
+  const hasDeal=(deal.min!=null&&deal.max!=null);
+  const hasStats=(st.p25!=null&&st.p75!=null);
+  const range=hasDeal?('¥'+deal.min+' – ¥'+deal.max):(hasStats?('参考区间 ¥'+st.p25+' – ¥'+st.p75):'未获取到成交区间');
+  const rangeLabel=hasDeal?'二手成交区间':'参考区间（按在售样本推算）';
+  const rangeHint=hasDeal?esc(deal.modelDesc||d.keyword):'该关键词没有成交价数据，试试更具体的型号，如「AirPods Pro 2」';
+  const asset=state.assets.find(x=>x.id===m.assetId)||{name:m.keyword};
   const sample=(d.listings.sample||[]).map(x=>`<li><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a><span>¥${x.price}${x.condition?' · '+esc(x.condition):''}</span></li>`).join('');
-  el.innerHTML=`<div class="market-deal"><div><small>二手成交区间</small><strong>${range}</strong><span>${esc(deal.modelDesc||d.keyword)}</span></div><div><small>在售样本</small><strong>${st.count||0} 件</strong><span>中位 ${st.median!=null?'¥'+st.median:'—'} · P25 ${st.p25!=null?'¥'+st.p25:'—'} · P75 ${st.p75!=null?'¥'+st.p75:'—'}</span></div></div>${sample?`<ol class="market-sample">${sample}</ol>`:''}${m.advice?`<div class="market-advice"><h3>转卖建议：¥${m.advice.low} – ¥${m.advice.high}</h3><p>${esc(m.advice.reason)}</p><p class="panel-note">时机：${m.advice.timing==='now'?'现在出手':m.advice.timing==='hold'?'先留着':'再等等'}${m.advice.risks.length?' · '+esc(m.advice.risks.join('；')):''}</p></div>`:''}${m.adviceError?`<div class="notice amber">${icon('info',15)}${esc(m.adviceError)}</div>`:''}`;
+  el.innerHTML=`<div class="market-deal"><div><small>${rangeLabel}</small><strong>${range}</strong><span>${rangeHint}</span></div><div><small>在售样本</small><strong>${st.count||0} 件</strong><span>中位 ${st.median!=null?'¥'+st.median:'—'} · P25 ${st.p25!=null?'¥'+st.p25:'—'} · P75 ${st.p75!=null?'¥'+st.p75:'—'}</span></div></div>${sample?`<ol class="market-sample">${sample}</ol>`:''}${m.advice?`<div class="market-advice"><h3>转卖建议：¥${m.advice.low} – ¥${m.advice.high}</h3><p>${esc(m.advice.reason)}</p><p class="panel-note">时机：${m.advice.timing==='now'?'现在出手':m.advice.timing==='hold'?'先留着':'再等等'}${m.advice.risks.length?' · '+esc(m.advice.risks.join('；')):''}</p></div>`:''}${m.adviceError?`<div class="notice amber">${icon('info',15)}${esc(m.adviceError)}</div>`:''}${marketToolsMarkup(d,st,deal,asset,m)}`;
 }
 function apiBase(){
   const injected=(typeof window!=='undefined'&&window.__API_BASE__)?String(window.__API_BASE__):'';
@@ -1780,7 +2013,7 @@ function apiBase(){
 async function openAssetMarket(id){
   const asset=state.assets.find(x=>x.id===id);
   if(!asset)return;
-  marketState={assetId:id,keyword:asset.name,data:null,error:'',loading:true,advice:null,adviceError:''};
+  marketState={assetId:id,keyword:asset.name,data:null,error:'',loading:true,advice:null,adviceError:'',condition:'95',fullBox:false,warranty:false,invoice:false,listing:null,listingError:'',listingLoading:false};
   openModal('市场行情与转卖建议',esc(asset.name)+' · 数据来自转转二手',marketMarkup(asset));
   renderMarketPanel();
   await queryMarket();
@@ -1807,6 +2040,51 @@ async function queryMarket(){
     renderMarketPanel();
   }
 }
+function marketToolsMarkup(d,st,deal,asset,m){
+  const adv=priceAdvice(d,{condition:m.condition||'95',fullBox:m.fullBox,warranty:m.warranty,invoice:m.invoice});
+  const midYuan=st.median!=null?st.median:((deal.min!=null&&deal.max!=null)?Math.round((deal.min+deal.max)/2):null);
+  const hold=holdingStats(asset,midYuan);
+  const condOptions=CONDITIONS.map(c=>`<option value="${c.id}"${(m.condition||'95')===c.id?' selected':''}>${c.label}</option>`).join('');
+  const pricing=adv.ok?`<div class="market-tiers"><div><small>快速出手</small><strong>¥${adv.tiers.fast}</strong></div><div><small>合理价位</small><strong>¥${adv.tiers.fair}</strong></div><div><small>耐心等</small><strong>¥${adv.tiers.patient}</strong></div></div><p class="market-listprice">建议挂牌 <strong>¥${adv.listPrice}</strong>，预留 ${Math.round(adv.buffer*100)}% 议价空间${adv.floor!=null?' · 不低于回收价 ¥'+adv.floor:''}</p>${adv.notes.length?`<p class="panel-note">${esc(adv.notes.join('；'))}</p>`:''}`:`<div class="notice amber">${icon('info',15)}${esc(adv.reason)}</div>`;
+  const holdMarkup=(hold&&hold.ratio!=null)?`<div class="market-hold"><div><small>购入</small><strong>¥${Math.round(asset.price/100)}</strong></div><div><small>持有</small><strong>${hold.days} 天</strong></div><div><small>现在约</small><strong>¥${Math.round(hold.current/100)}</strong></div><div><small>保值率</small><strong>${Math.round(hold.ratio*100)}%</strong></div><div><small>日均成本</small><strong>${hold.days>=7?'¥'+(hold.daily/100).toFixed(2):'—'}</strong></div></div><p class="panel-note">按当前在售中位价估算；再放 30 天，预计再贬约 ¥${Math.round(hold.burn30/100)}。</p>`:`<p class="panel-note">缺少购入价或市场价，暂无法估算持有成本。</p>`;
+  const listing=m.listing?`<div class="market-listing"><p class="listing-title">${esc(m.listing.title)}</p><p class="listing-desc">${esc(m.listing.description)}</p><p class="listing-tags">${m.listing.tags.map(t=>`<span>${esc(t)}</span>`).join('')}</p><div class="form-actions"><button class="button" data-action="market-listing-copy">复制文案</button></div></div>`:'';
+  return `<div class="market-tools"><section class="market-block"><h3>挂牌价建议</h3><div class="market-flags"><label>成色<select data-market-field="condition">${condOptions}</select></label><label><input type="checkbox" data-market-flag="fullBox"${m.fullBox?' checked':''}>全套配件</label><label><input type="checkbox" data-market-flag="warranty"${m.warranty?' checked':''}>在保</label><label><input type="checkbox" data-market-flag="invoice"${m.invoice?' checked':''}>有发票</label></div>${pricing}</section><section class="market-block"><h3>持有成本</h3>${holdMarkup}</section><section class="market-block"><h3>转卖文案</h3>${visionReady(visionCfg)?`<div class="form-actions"><button class="button" data-action="market-listing">${m.listingLoading?'生成中…':'生成文案'}</button></div>`:'<p class="panel-note">需要先在设置里配置 AI。</p>'}${m.listingError?`<div class="notice amber">${icon('info',15)}${esc(m.listingError)}</div>`:''}${listing}</section></div>`;
+}
+async function askListingText(){
+  if(!marketState||!marketState.data){toast('请先查询行情');return;}
+  if(!visionReady(visionCfg)){toast('需要先配置 AI（设置 → AI 识图）');return;}
+  const asset=state.assets.find(x=>x.id===marketState.assetId);
+  if(!asset)return;
+  const adv=priceAdvice(marketState.data,{condition:marketState.condition,fullBox:marketState.fullBox,warranty:marketState.warranty,invoice:marketState.invoice});
+  marketState.listingLoading=true;marketState.listingError='';
+  renderMarketPanel();
+  try{
+    const payload=await callChat(buildListingMessages(asset,{...marketState,advice:adv}),visionTuning(visionCfg));
+    const res=normalizeListing(payload);
+    if(!res.ok)throw Error(res.reason||'文案生成失败');
+    marketState.listing=res;
+  }catch(err){
+    marketState.listingError=err&&err.message?err.message:'文案生成失败';
+  }finally{
+    marketState.listingLoading=false;
+    renderMarketPanel();
+  }
+}
+function copyListingText(){
+  const l=marketState&&marketState.listing;
+  if(!l)return;
+  const text=l.title+'\n'+l.description+'\n'+l.tags.map(t=>'#'+t).join(' ');
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(()=>toast('文案已复制'),()=>toast('复制失败，请手动选择'));
+  }else{toast('当前环境不支持自动复制');}
+}
+document.addEventListener('change',e=>{
+  if(!marketState)return;
+  const f=e.target.closest('[data-market-field]');
+  if(f){marketState[f.dataset.marketField]=f.value;renderMarketPanel();return;}
+  const c=e.target.closest('[data-market-flag]');
+  if(c){marketState[c.dataset.marketFlag]=c.checked;renderMarketPanel();}
+});
 async function askResaleAdvice(){
   if(!marketState||!marketState.data){toast('请先查询行情');return;}
   if(!visionReady(visionCfg)){toast('需要先配置 AI（设置 → AI 识图）');return;}
@@ -1853,7 +2131,7 @@ function download(name,content,type){const url=URL.createObjectURL(new Blob([con
 function exportCSV(){const cell=v=>'"'+String(v).replace(/^[=+@\-\t\r]/,"'$&").replaceAll('"','""')+'"';const rows=[['日期','交易名称','收支类型','分类','金额（元）','币种','备注'],...[...state.transactions].sort(sortTx).map(t=>[t.date,t.title,t.type==='income'?'收入':'支出',t.category,(t.amount/100).toFixed(2),'CNY',t.note])];download(`来财账本-${today()}.csv`,'\uFEFF'+rows.map(r=>r.map(cell).join(',')).join('\r\n'),'text/csv;charset=utf-8');}
 function parseAndRender(){try{const text=$('#natural-text').value;parsed=parseText(text);if(!parsed.length){$('#parse-results').innerHTML='<div class="notice amber" style="margin-top:20px">没有找到可确认的记录。试试“午饭28元，打车35元”，也可切换手动输入。</div>';return;}$('#parse-results').innerHTML=draftForm(parsed,'本地规则 · 非 AI',`已生成 ${parsed.length} 条草稿。规则可能遗漏信息，请核对原文和金额；无法解析的部分不会入账。`);}catch(e){toast(e.message);}}
 function startVoice(){if(recognition){recognition.stop();recognition=null;return;}const Speech=window.SpeechRecognition||window.webkitSpeechRecognition;if(!Speech){$('#voice-hint').textContent='当前浏览器不支持语音输入，请在下方直接输入文字。';return;}try{recognition=new Speech();recognition.lang='zh-CN';recognition.interimResults=false;recognition.continuous=false;recognition.onstart=()=>{$('.voice-button')?.classList.add('listening');if($('#voice-hint'))$('#voice-hint').textContent='正在聆听…再点一次停止';};recognition.onresult=e=>{if($('#natural-text'))$('#natural-text').value+=e.results[0][0].transcript;};recognition.onerror=e=>{if($('#voice-hint'))$('#voice-hint').textContent=e.error==='not-allowed'?'麦克风权限未获准，请使用文字输入。':'语音服务暂不可用，请直接输入文字。';};recognition.onend=()=>{recognition=null;$('.voice-button')?.classList.remove('listening');if($('#voice-hint')?.textContent.includes('聆听'))$('#voice-hint').textContent='录音结束，请核对文字并生成待确认记录';};recognition.start();}catch{recognition=null;toast('语音服务不可用，可以直接输入文字');}}
-document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
+document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'market-listing':askListingText();break;case 'market-listing-copy':copyListingText();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
 case 'account':openAccountEntry();break;
 case 'login':loginModal();break;
 case 'send-code':doSendCode();break;

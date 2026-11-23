@@ -101,6 +101,9 @@
 .ai-note.loading{display:flex;align-items:center;gap:8px;color:var(--muted)}
 .ai-note.loading .spinner{width:12px;height:12px}
 
+.ai-headline{margin:10px 0 0;font-size:14px;font-weight:600;color:var(--ink);background:#f3f6ee;border-left:3px solid var(--green);padding:8px 10px;border-radius:6px}
+.ai-report{margin:0;font-size:13px;line-height:1.9;color:var(--ink);white-space:pre-wrap}
+
 </style>
 </head>
 <body>
@@ -1076,18 +1079,44 @@ function toYuan(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-/** search 返回的 items → 统一结构 */
+/** 成色码 → 档位：99A→99，95B→95，9A→90，8B→80，7C→70 */
+function conditionBucket(code) {
+  const s = String(code || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+  if (!s) return '';
+  if (s.startsWith('99')) return '99';
+  if (s.startsWith('95')) return '95';
+  if (s.startsWith('9')) return '90';
+  if (s.startsWith('8')) return '80';
+  if (s.startsWith('7')) return '70';
+  return '';
+}
+
+/** 从标题里抽特征：维修机、无配件、容量、国行 */
+function titleFlags(title) {
+  const t = String(title || '');
+  const repaired = /(换屏|换过|维修|拆机|组装|有锁|无面容|进水)/.test(t);
+  const noBox = /(单机|无配件|缺配件)/.test(t);
+  const capacity = (/(\d{2,4})\s*G\b/i.exec(t) || [])[1] || '';
+  const region = /国行/.test(t) ? '国行' : (/港版|美版|日版/.exec(t) || [''])[0];
+  return {repaired, noBox, capacity, region};
+}
+
+/** search 返回的 items → 统一结构（含成色档与标题特征） */
 function normalizeListings(items) {
   if (!Array.isArray(items)) return [];
   return items
     .map(it => {
       const price = toYuan(it && it.price);
       if (price === null) return null;
+      const title = String((it && it.title) || '').slice(0, 80);
+      const condition = String((it && it.chengSe) || '');
       return {
         id: String((it && it.infoId) || ''),
-        title: String((it && it.title) || '').slice(0, 80),
+        title,
         price,
-        condition: String((it && it.chengSe) || ''),
+        condition,
+        bucket: conditionBucket(condition),
+        flags: titleFlags(title),
         url: String((it && it.jumpUrl) || '')
       };
     })
@@ -1105,19 +1134,107 @@ function priceStats(prices) {
   return {count: list.length, min: list[0], p25: at(0.25), median: mid, p75: at(0.75), max: list[list.length - 1]};
 }
 
+/** 加权中位数：同成色权重 1，相邻档 0.6，其他 0.3 */
+function weightedMedian(pairs) {
+  const list = (pairs || []).filter(x => Number.isFinite(x.v) && x.v > 0 && Number.isFinite(x.w) && x.w > 0)
+    .sort((a, b) => a.v - b.v);
+  if (!list.length) return null;
+  const total = list.reduce((s, x) => s + x.w, 0);
+  let acc = 0;
+  for (const x of list) {
+    acc += x.w;
+    if (acc >= total / 2) return Math.round(x.v);
+  }
+  return Math.round(list[list.length - 1].v);
+}
+
+/** 3×IQR 剔除极端值（引流价、拆机件），并剔除维修机 */
+function filterOutliers(listings) {
+  const list = Array.isArray(listings) ? listings : [];
+  if (list.length < 8) return {kept: list, removed: 0};
+  const prices = list.map(x => x.price).sort((a, b) => a - b);
+  const at = p => prices[Math.min(prices.length - 1, Math.max(0, Math.round((prices.length - 1) * p)))];
+  const q1 = at(0.25), q3 = at(0.75), iqr = q3 - q1;
+  const low = q1 - 3 * iqr, high = q3 + 3 * iqr;
+  const kept = list.filter(x => x.price >= low && x.price <= high && !x.flags.repaired);
+  return {kept, removed: list.length - kept.length};
+}
+
+/** bootstrap 置信区间：回答"这个中位数有多准" */
+function bootstrapCI(values, options = {}) {
+  const list = (values || []).filter(n => Number.isFinite(n) && n > 0);
+  const iterations = options.iterations || 200;
+  const rand = options.rand || Math.random;
+  if (list.length < 5) return {low: null, high: null};
+  const medians = [];
+  for (let i = 0; i < iterations; i++) {
+    const pick = [];
+    for (let k = 0; k < list.length; k++) pick.push(list[Math.floor(rand() * list.length)]);
+    medians.push(priceStats(pick).median);
+  }
+  medians.sort((a, b) => a - b);
+  const at = p => medians[Math.min(medians.length - 1, Math.max(0, Math.round((medians.length - 1) * p)))];
+  return {low: at(0.025), high: at(0.975)};
+}
+
 /** 汇总成前端要的行情快照 */
-function buildSnapshot({keyword, marketText, items, source = 'zhuanzhuan', fetchedAt = Date.now()}) {
+function buildSnapshot(input) {
+  const {keyword, marketText, items, source = 'zhuanzhuan', fetchedAt = Date.now(), targetCondition = '', rand} = input || {};
   const deal = parseMarketPriceText(marketText);
-  const listings = normalizeListings(items);
+  const all = normalizeListings(items);
+  const cleaned = filterOutliers(all);
+  const pool = cleaned.kept;
+
+  const byCondition = {};
+  for (const x of pool) {
+    const b = x.bucket || '未知';
+    byCondition[b] = (byCondition[b] || 0) + 1;
+  }
+
+  const target = String(targetCondition || '');
+  const same = target ? pool.filter(x => x.bucket === target) : [];
+  const usedSubset = same.length >= 8;
+  const basis = usedSubset ? same : pool;
+
+  const weights = basis.map(x => {
+    if (!target || !x.bucket) return 1;
+    const gap = Math.abs(Number(x.bucket) - Number(target)) / 10;
+    if (gap === 0) return 1;
+    if (gap <= 1) return 0.6;
+    return 0.3;
+  });
+  const prices = basis.map(x => x.price);
+  const stats = priceStats(prices);
+  if (usedSubset && prices.length) stats.median = weightedMedian(prices.map((v, i) => ({v, w: weights[i]})));
+
+  const ci = bootstrapCI(prices, {rand});
+  stats.ciLow = ci.low;
+  stats.ciHigh = ci.high;
+
+  const dealMid = (deal.min != null && deal.max != null) ? Math.round((deal.min + deal.max) / 2) : null;
+  let delta = null;
+  if (dealMid != null && stats.median && basis.length >= 5) {
+    delta = Math.min(1.05, Math.max(0.55, dealMid / stats.median));
+    delta = Math.round(delta * 100) / 100;
+  }
+
   return {
     keyword,
     source,
     fetchedAt,
     deal,
-    listings: {count: listings.length, stats: priceStats(listings.map(x => x.price)), sample: listings.slice(0, 5)}
+    listings: {
+      rawCount: all.length,
+      count: basis.length,
+      removed: cleaned.removed,
+      byCondition,
+      stats,
+      sample: basis.slice(0, 5)
+    },
+    subset: {condition: usedSubset ? target : '', count: same.length, used: usedSubset, requested: target},
+    calibration: {delta, askMedian: stats.median, dealMid}
   };
 }
-
 
 
 /** 优先用成交区间；没有时退回在售样本的 P25–P75，并标明来源 */
@@ -1270,7 +1387,11 @@ function bargainBuffer(snapshot) {
  * opts: {condition, fullBox, warranty, invoice, recycle}
  */
 function priceAdvice(snapshot, opts = {}) {
-  const factor = conditionFactor(opts.condition || '95');
+  const subset = (snapshot && snapshot.subset) || {};
+  const cal = (snapshot && snapshot.calibration) || {};
+  // 已经筛到同成色样本时不再乘成色系数，避免重复折算
+  const factor = subset.used ? 1 : conditionFactor(opts.condition || '95');
+  const delta = Number.isFinite(cal.delta) ? cal.delta : 1;
   const bonus = bonusFor(opts);
   const st = (snapshot && snapshot.listings && snapshot.listings.stats) || {};
   const deal = (snapshot && snapshot.deal) || {};
@@ -1282,9 +1403,11 @@ function priceAdvice(snapshot, opts = {}) {
   const adj = (v) => Math.round(v * factor * (1 + bonus));
   const p25 = Number.isFinite(st.p25) ? st.p25 : base;
   const p75 = Number.isFinite(st.p75) ? st.p75 : base;
-  let fast = adj(p25);
-  let fair = adj(base);
-  let patient = adj(p75);
+  // 三档用"预计成交价"（挂牌 × 校准系数），挂牌价另算
+  const toDeal = (v) => Math.round(v * delta * factor * (1 + bonus));
+  let fast = toDeal(p25);
+  let fair = toDeal(base);
+  let patient = toDeal(p75);
   fast = Math.min(fast, fair);
   patient = Math.max(patient, fair);
 
@@ -1296,6 +1419,8 @@ function priceAdvice(snapshot, opts = {}) {
   if ((st.count || 0) < 5) notes.push('在售样本偏少，价格参考性一般');
   if (!Number.isFinite(st.median)) notes.push('缺少在售中位价，改用成交中值估算');
   if (bonus > 0) notes.push('已按配件/保修加成 ' + Math.round(bonus * 100) + '%');
+  if (subset.used) notes.push('已按同成色 ' + (subset.condition || '') + ' 新样本计算');
+  if (Number.isFinite(cal.delta) && cal.delta !== 1) notes.push('已按挂牌→成交折扣 ' + Math.round(cal.delta * 100) + '% 校准');
 
   const buffer = bargainBuffer(snapshot);
   return {
@@ -1308,7 +1433,10 @@ function priceAdvice(snapshot, opts = {}) {
     p25,
     p75,
     tiers: {fast, fair, patient},
-    listPrice: Math.round(fair * (1 + buffer)),
+    listPrice: Math.round(base * factor * (1 + bonus) * (1 + buffer)),
+    delta,
+    subset: {used: !!subset.used, condition: subset.condition || '', count: subset.count || 0},
+    ci: {low: st.ciLow != null ? Math.round(st.ciLow * delta * factor) : null, high: st.ciHigh != null ? Math.round(st.ciHigh * delta * factor) : null},
     notes
   };
 }
@@ -1409,8 +1537,8 @@ function normalizeListing(payload) {
 }
 
 
-/** 允许出现在文案里的数字（元），用于事后校验，防止模型编价格 */
-function allowedNumbers(price, hold) {
+/** 允许出现的数字（元/件/%），用于事后校验，防止模型编数字 */
+function allowedNumbers(price, hold, extra = {}) {
   const out = new Set();
   const add = (v) => { if (Number.isFinite(v)) out.add(Math.round(v)); };
   const p = price || {};
@@ -1418,20 +1546,29 @@ function allowedNumbers(price, hold) {
   add(t.fast); add(t.fair); add(t.patient); add(p.listPrice); add(p.floor); add(p.base); add(p.p25); add(p.p75);
   if (Number.isFinite(p.buffer)) add(p.buffer * 100);
   if (Number.isFinite(p.factor)) add(p.factor * 100);
+  if (Number.isFinite(p.delta)) add(p.delta * 100);
+  if (p.ci) { add(p.ci.low); add(p.ci.high); }
   const h = hold || {};
   if (h.current != null) add(h.current / 100);
   if (h.daily != null) add(h.daily / 100);
   if (h.burn30 != null) add(h.burn30 / 100);
   if (h.ratio != null) add(h.ratio * 100);
   add(h.days);
+  for (const key of ['rawCount', 'count', 'removed', 'subsetCount', 'ciLow', 'ciHigh', 'dealMin', 'dealMax', 'dealMid', 'condition', 'price', 'year']) {
+    add(extra[key]);
+  }
   return [...out];
 }
 
-/** 一次调用同时产出：定价解读、持有成本解读、转卖文案 */
+/** 一次调用产出：结论 + 报告体分析 + 文案 */
 function buildAdvicePrompt(asset, ctx = {}) {
   const price = ctx.price || {};
   const tiers = price.tiers || {};
   const hold = ctx.hold || {};
+  const snap = ctx.snapshot || {};
+  const st = (snap.listings && snap.listings.stats) || {};
+  const sub = snap.subset || {};
+  const cal = snap.calibration || {};
   const yuan = (cents) => (Number.isFinite(cents) ? Math.round(cents / 100) : null);
   const flags = [];
   if (ctx.fullBox) flags.push('全套配件');
@@ -1439,45 +1576,46 @@ function buildAdvicePrompt(asset, ctx = {}) {
   if (ctx.invoice) flags.push('有发票');
 
   return [
-    '你是二手交易顾问兼文案撰写者。请只根据下面的数字写作，不得引入任何新的价格数字，也不得编造未提供的功能或成色。',
+    '你是二手交易分析师。请写一份简短的估价报告：结论先行，但必须解释依据，不得引入任何未提供的数字。',
     '',
     '商品：' + (asset.name || ''),
     '成色：' + conditionLabel(ctx.condition || '95'),
     '附加：' + (flags.join('、') || '无'),
     '购入价：' + (yuan(asset.price) != null ? yuan(asset.price) : '未知') + ' 元',
     '购入日期：' + (asset.date || '未知'),
-    '备注：' + (asset.note || '无'),
     '',
-    '定价计算（单位：元）：',
-    '基准价 ' + (price.base != null ? price.base : '未知') + '，成色系数 ' + (price.factor != null ? price.factor : '未知'),
-    '快速出手 ' + (tiers.fast != null ? tiers.fast : '未知') + '，合理 ' + (tiers.fair != null ? tiers.fair : '未知') + '，耐心 ' + (tiers.patient != null ? tiers.patient : '未知'),
-    '建议挂牌 ' + (price.listPrice != null ? price.listPrice : '未知') + '，议价缓冲 ' + (price.buffer != null ? Math.round(price.buffer * 100) + '%' : '未知'),
-    '价格下限 ' + (price.floor != null ? price.floor : '未提供'),
+    '样本情况：',
+    '原始抓取 ' + (snap.listings ? snap.listings.rawCount : '未知') + ' 条，剔除异常 ' + (snap.listings ? snap.listings.removed : '未知') + ' 条，进入统计 ' + (snap.listings ? snap.listings.count : '未知') + ' 条',
+    '同成色筛选：' + (sub.used ? ('已启用，' + sub.count + ' 条同成色样本') : '未启用（样本不足，按全部样本计算）'),
+    '挂牌中位 ' + (st.median != null ? st.median : '未知') + ' 元，P25 ' + (st.p25 != null ? st.p25 : '未知') + '，P75 ' + (st.p75 != null ? st.p75 : '未知'),
+    '95% 置信区间 ' + (st.ciLow != null ? st.ciLow : '未知') + ' - ' + (st.ciHigh != null ? st.ciHigh : '未知') + ' 元',
+    '成交区间 ' + (snap.deal && snap.deal.min != null ? snap.deal.min : '未知') + ' - ' + (snap.deal && snap.deal.max != null ? snap.deal.max : '未知') + ' 元',
+    '挂牌到成交折扣 ' + (cal.delta != null ? Math.round(cal.delta * 100) + '%' : '未获取'),
     '',
-    '持有情况：',
-    '持有天数 ' + (hold.days != null ? hold.days : '未知'),
-    '当前市值 ' + (hold.current != null ? yuan(hold.current) : '未知') + ' 元',
-    '保值率 ' + (hold.ratio != null ? Math.round(hold.ratio * 100) + '%' : '未知'),
-    '日均成本 ' + (hold.daily != null ? (hold.daily / 100).toFixed(2) : '未知') + ' 元',
-    '再持有 30 天预计再贬 ' + (hold.burn30 != null ? yuan(hold.burn30) : '未知') + ' 元',
+    '定价结果：',
+    '三档预计成交：快速 ' + (tiers.fast != null ? tiers.fast : '未知') + '，合理 ' + (tiers.fair != null ? tiers.fair : '未知') + '，耐心 ' + (tiers.patient != null ? tiers.patient : '未知') + ' 元',
+    '建议挂牌 ' + (price.listPrice != null ? price.listPrice : '未知') + ' 元，议价缓冲 ' + (price.buffer != null ? Math.round(price.buffer * 100) + '%' : '未知'),
+    '',
+    '持有情况：持有 ' + (hold.days != null ? hold.days : '未知') + ' 天，当前市值 ' + (hold.current != null ? yuan(hold.current) : '未知') + ' 元，保值率 ' + (hold.ratio != null ? Math.round(hold.ratio * 100) + '%' : '未知') + '，日均成本 ' + (hold.daily != null ? (hold.daily / 100).toFixed(2) : '未知') + ' 元，30 天预计再贬 ' + (hold.burn30 != null ? yuan(hold.burn30) : '未知') + ' 元',
     '',
     '输出 JSON，不要任何解释：',
-    '{"pricing":"40字以内：定价逻辑","holding":"40字以内：持有成本说明","action":"sell|wait|hold","risks":["..."],"listing":{"title":"30字内","description":"80-160字","tags":["..."]}}',
+    '{"headline":"30字以内结论","analysis":"300-500字分析报告","action":"sell|wait|hold","risks":["..."],"listing":{"title":"30字内","description":"80-160字","tags":["..."]}}',
     '',
-    '规则：',
-    '1. 只能使用上面出现过的数字，不得自行计算新的价格。',
-    '2. pricing 讲定价逻辑，holding 讲持有成本，不要重复。',
-    '3. action 三选一：sell 建议出手，wait 再等等，hold 继续持有。',
-    '4. listing.title 含型号与成色，不超过 30 字；description 3-4 句，不写价格；tags 3-5 个。',
-    '5. 不得出现“全新”“无任何瑕疵”等未经确认的表述。',
-    '6. risks 最多 2 条，只写数据不足这类真实风险。'
+    '写作要求：',
+    '1. headline 直接给结论，例如“建议挂 720-760，两周内可出手”。',
+    '2. analysis 写成一段通顺的报告，分三层：先说结论和依据；再解释为什么是这个价（样本量、同成色、置信区间、折扣）；最后说风险与操作建议。不要只列要点，要成句。',
+    '3. analysis 里必须至少提到样本数量、置信区间、折扣率中的两项，用来支撑结论。',
+    '4. 只能使用上面出现过的数字，不得自行计算新的价格。',
+    '5. action 三选一：sell 建议出手，wait 再等等，hold 继续持有。',
+    '6. listing.title 含型号与成色，30 字内；description 3-4 句不写价格；tags 3-5 个。',
+    '7. 不得出现“全新”“无任何瑕疵”等未经确认的表述。'
   ].join('\n');
 }
 
 function buildAdviceMessages(asset, ctx = {}) {
   return [
     {role: 'system', content: buildAdvicePrompt(asset, ctx)},
-    {role: 'user', content: '请输出 JSON。'}
+    {role: 'user', content: '请按规则输出 JSON。'}
   ];
 }
 
@@ -1501,28 +1639,29 @@ function normalizeListingPart(raw) {
   return {title: title.slice(0, 30), description: description.slice(0, 200), tags};
 }
 
-/** 校验：文中出现的数字必须来自允许集合（±1 容差） */
 function normalizeAdviceText(payload, allowed = []) {
   const src = payload && typeof payload === 'object' ? payload : {};
-  const pricing = String(src.pricing || '').trim();
-  const holding = String(src.holding || '').trim();
+  const headline = String(src.headline || src.pricing || '').trim();
+  const analysis = String(src.analysis || src.holding || '').trim();
   const listing = normalizeListingPart(src.listing);
-  if (!pricing && !holding && !listing) return {ok: false, reason: '模型没有给出解读'};
+  if (!headline && !analysis && !listing) return {ok: false, reason: '模型没有给出分析'};
 
   const set = allowed.map(Number).filter(Number.isFinite);
   const stray = [];
-  for (const text of [pricing, holding]) {
+  for (const text of [headline, analysis]) {
     for (const n of numbersIn(text)) {
       if (!set.some((a) => Math.abs(a - n) <= 1)) stray.push(n);
     }
   }
 
   const action = ['sell', 'wait', 'hold'].includes(src.action) ? src.action : 'wait';
-  const risks = Array.isArray(src.risks) ? src.risks.map(String).slice(0, 2) : [];
+  const risks = Array.isArray(src.risks) ? src.risks.map(String).slice(0, 3) : [];
   return {
     ok: true,
-    pricing: pricing.slice(0, 80),
-    holding: holding.slice(0, 80),
+    headline: headline.slice(0, 60),
+    analysis: analysis.slice(0, 1200),
+    pricing: headline.slice(0, 60),
+    holding: analysis.slice(0, 1200),
     listing,
     action,
     risks,
@@ -2109,7 +2248,7 @@ function importBackupFile(file){
 }
 let marketState=null;
 function marketMarkup(asset){
-  return `<div class="market-modal"><label class="field">查询关键词<input id="market-keyword" maxlength="40" value="${esc(marketState?marketState.keyword:asset.name)}" placeholder="建议用具体型号，例如 AirPods Pro 2"></label><div class="form-actions"><button class="button primary" data-action="market-query">查询行情</button>${visionReady(visionCfg)?`<button class="button" data-action="market-advice">让 AI 给建议</button>`:''}</div><div id="market-panel" class="market-panel"></div><p class="panel-note">行情来自转转二手接口，只代表本次查询结果，不等于全网最低价，也不构成交易建议。</p></div>`;
+  return `<div class="market-modal"><label class="field">查询关键词<input id="market-keyword" maxlength="40" value="${esc(marketState?marketState.keyword:asset.name)}" placeholder="建议用具体型号，例如 AirPods Pro 2"></label><div class="form-actions"><button class="button primary" data-action="market-query">查询行情</button>${visionReady(visionCfg)?`<button class="button" data-action="market-advice">让 AI 给建议</button>`:''}</div><p class="panel-note" id="market-ai-status">AI 状态：${visionReady(visionCfg)?("已配置 · "+esc(visionCfg.model)):"未配置（设置 → AI 识图）"}</p><div id="market-panel" class="market-panel"></div><p class="panel-note">行情来自转转二手接口，只代表本次查询结果，不等于全网最低价，也不构成交易建议。</p></div>`;
 }
 function renderMarketPanel(){
   const el=$('#market-panel');
@@ -2129,9 +2268,13 @@ function renderMarketPanel(){
   const range=hasDeal?('¥'+deal.min+' – ¥'+deal.max):(hasStats?('参考区间 ¥'+st.p25+' – ¥'+st.p75):'未获取到成交区间');
   const rangeLabel=hasDeal?'二手成交区间':'参考区间（按在售样本推算）';
   const rangeHint=hasDeal?esc(deal.modelDesc||d.keyword):'该关键词没有成交价数据，试试更具体的型号，如「AirPods Pro 2」';
+  const sub=d.subset||{},cal=d.calibration||{};
+  const ciText=(st.ciLow!=null&&st.ciHigh!=null)?('，95% 区间 ¥'+st.ciLow+'–¥'+st.ciHigh):'';
+  const calText=(cal.delta!=null)?('预计成交 ¥'+Math.round((st.median||0)*cal.delta)+'（挂牌 ×'+Math.round(cal.delta*100)+'%）'):'';
+  const sampleText='原始 '+(d.listings.rawCount||0)+' 条 · 剔除 '+(d.listings.removed||0)+' 件'+(sub.used?' · 同成色 '+sub.count+' 件':' · 未筛到同成色样本');
   const asset=state.assets.find(x=>x.id===m.assetId)||{name:m.keyword};
   const sample=(d.listings.sample||[]).map(x=>`<li><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a><span>¥${x.price}${x.condition?' · '+esc(x.condition):''}</span></li>`).join('');
-  el.innerHTML=`<div class="market-deal"><div><small>${rangeLabel}</small><strong>${range}</strong><span>${rangeHint}</span></div><div><small>在售样本</small><strong>${st.count||0} 件</strong><span>中位 ${st.median!=null?'¥'+st.median:'—'} · P25 ${st.p25!=null?'¥'+st.p25:'—'} · P75 ${st.p75!=null?'¥'+st.p75:'—'}</span></div></div>${sample?`<ol class="market-sample">${sample}</ol>`:''}${m.advice?`<div class="market-advice"><h3>转卖建议：¥${m.advice.low} – ¥${m.advice.high}</h3><p>${esc(m.advice.reason)}</p><p class="panel-note">时机：${m.advice.timing==='now'?'现在出手':m.advice.timing==='hold'?'先留着':'再等等'}${m.advice.risks.length?' · '+esc(m.advice.risks.join('；')):''}</p></div>`:''}${m.adviceError?`<div class="notice amber">${icon('info',15)}${esc(m.adviceError)}</div>`:''}${marketToolsMarkup(d,st,deal,asset,m)}`;
+  el.innerHTML=`<div class="market-deal"><div><small>${rangeLabel}</small><strong>${range}</strong><span>${rangeHint}</span></div><div><small>在售样本</small><strong>${st.count||0} 件</strong><span>中位 ${st.median!=null?'¥'+st.median:'—'}${ciText} · P25 ${st.p25!=null?'¥'+st.p25:'—'} · P75 ${st.p75!=null?'¥'+st.p75:'—'}</span><span>${sampleText}</span>${calText?`<span>${calText}</span>`:''}</div></div>${sample?`<ol class="market-sample">${sample}</ol>`:''}${m.advice?`<div class="market-advice"><h3>转卖建议：¥${m.advice.low} – ¥${m.advice.high}</h3><p>${esc(m.advice.reason)}</p><p class="panel-note">时机：${m.advice.timing==='now'?'现在出手':m.advice.timing==='hold'?'先留着':'再等等'}${m.advice.risks.length?' · '+esc(m.advice.risks.join('；')):''}</p></div>`:''}${m.adviceError?`<div class="notice amber">${icon('info',15)}${esc(m.adviceError)}</div>`:''}${marketToolsMarkup(d,st,deal,asset,m)}`;
 }
 function apiBase(){
   const injected=(typeof window!=='undefined'&&window.__API_BASE__)?String(window.__API_BASE__):'';
@@ -2153,7 +2296,7 @@ async function queryMarket(){
   marketState.loading=true;marketState.error='';marketState.advice=null;marketState.adviceError='';
   renderMarketPanel();
   try{
-    const res=await fetch(apiBase()+'/api/zz/market?keyword='+encodeURIComponent(marketState.keyword));
+    const res=await fetch(apiBase()+'/api/zz/market?keyword='+encodeURIComponent(marketState.keyword)+'&condition='+encodeURIComponent(marketState.condition||''));
     const body=await res.json();
     if(!body.ok)throw Error(body.error||'行情查询失败');
     marketState.data=body.data;
@@ -2182,14 +2325,15 @@ function marketToolsMarkup(d,st,deal,asset,m){
   const holdMarkup=(hold&&hold.ratio!=null)?`<div class="market-hold"><div><small>购入</small><strong>¥${Math.round(asset.price/100)}</strong></div><div><small>持有</small><strong>${hold.days} 天</strong></div><div><small>现在约</small><strong>¥${Math.round(hold.current/100)}</strong></div><div><small>保值率</small><strong>${Math.round(hold.ratio*100)}%</strong></div><div><small>日均成本</small><strong>${hold.days>=7?'¥'+(hold.daily/100).toFixed(2):'—'}</strong></div></div><p class="panel-note">按当前在售中位价估算；再放 30 天，预计再贬约 ¥${Math.round(hold.burn30/100)}。</p>`:`<p class="panel-note">缺少购入价或市场价，暂无法估算持有成本。</p>`;
   const skeleton=t=>`<p class="ai-note loading"><span class="spinner" aria-hidden="true"></span>${t}</p>`;
   const needAI=`<p class="panel-note">在设置里配置 AI 后，这里会自动生成。</p>`;
-  const pricingAI=rep&&rep.pricing?`<p class="ai-note">${esc(rep.pricing)}</p>`:(loading?skeleton('AI 正在写定价解读…'):(aiReady?'':needAI));
-  const holdingAI=(rep&&rep.holding?`<p class="ai-note">${esc(rep.holding)}</p>`:(loading?skeleton('AI 正在分析持有成本…'):(aiReady?'':needAI)))
+  const pricingAI=rep&&rep.pricing?`<p class="ai-headline">${esc(rep.headline||rep.pricing)}</p>`:(loading?skeleton('AI 正在写定价解读…'):(aiReady?'':needAI));
+  const holdingAI=(rep&&rep.holding?`<p class="panel-note">详细依据见下方「AI 分析报告」。</p>`:(loading?skeleton('AI 正在分析持有成本…'):(aiReady?'':needAI)))
     +(rep?`<p class="panel-note">AI 判断：${rep.action==='sell'?'建议出手':rep.action==='hold'?'继续持有':'再等等'}${rep.risks.length?' · '+esc(rep.risks.join('；')):''}</p>`:'')
     +((rep&&rep.unverified&&rep.unverified.length)?`<div class="notice amber">文中出现了参考数据之外的数字（${rep.unverified.join('、')}），请以上方表格为准。</div>`:'')
     +(m.reportError?`<div class="notice amber">${icon('info',15)}${esc(m.reportError)}</div>`:'')
     +(loading?skeleton('AI 正在写转卖文案…'):'');
+  const reportMarkup=(rep&&rep.analysis)?`<p class="ai-report">${esc(rep.analysis)}</p>`:(loading?skeleton('AI 正在写分析报告…'):(aiReady?'<p class="panel-note">暂无报告。</p>':needAI));
   const listingMarkup=rep&&rep.listing?`<div class="market-listing"><p class="listing-title">${esc(rep.listing.title)}</p><p class="listing-desc">${esc(rep.listing.description)}</p><p class="listing-tags">${rep.listing.tags.map(t=>`<span>${esc(t)}</span>`).join('')}</p><div class="form-actions"><button class="button" data-action="market-listing-copy">复制文案</button></div></div>`:'<p class="panel-note">暂无文案。</p>';
-  return `<div class="market-tools"><section class="market-block"><h3>挂牌价建议</h3><div class="market-flags"><label>成色<select data-market-field="condition">${condOptions}</select></label><label><input type="checkbox" data-market-flag="fullBox"${m.fullBox?' checked':''}>全套配件</label><label><input type="checkbox" data-market-flag="warranty"${m.warranty?' checked':''}>在保</label><label><input type="checkbox" data-market-flag="invoice"${m.invoice?' checked':''}>有发票</label></div>${pricing}${pricingAI}</section><section class="market-block"><h3>持有成本</h3>${holdMarkup}${holdingAI}</section><section class="market-block"><h3>转卖文案</h3>${listingMarkup}</section></div>`;
+  return `<div class="market-tools"><section class="market-block"><h3>挂牌价建议</h3><div class="market-flags"><label>成色<select data-market-field="condition">${condOptions}</select></label><label><input type="checkbox" data-market-flag="fullBox"${m.fullBox?' checked':''}>全套配件</label><label><input type="checkbox" data-market-flag="warranty"${m.warranty?' checked':''}>在保</label><label><input type="checkbox" data-market-flag="invoice"${m.invoice?' checked':''}>有发票</label></div>${pricing}${pricingAI}</section><section class="market-block"><h3>持有成本</h3>${holdMarkup}${holdingAI}</section><section class="market-block"><h3>AI 分析报告</h3>${reportMarkup}</section><section class="market-block"><h3>转卖文案</h3>${listingMarkup}</section></div>`;
 }
 async function generateReport(){
   if(!marketState||!marketState.data)return;
@@ -2206,7 +2350,8 @@ async function generateReport(){
   try{
     const payload=await callChat(buildAdviceMessages(asset,{condition:marketState.condition,fullBox:marketState.fullBox,warranty:marketState.warranty,invoice:marketState.invoice,price:adv,hold,snapshot:d}),visionTuning(visionCfg));
     if(seq!==marketState.reportSeq)return;
-    const res=normalizeAdviceText(payload,allowedNumbers(adv,hold));
+    const extra={rawCount:d.listings.rawCount,count:d.listings.count,removed:d.listings.removed,subsetCount:(d.subset&&d.subset.count)||0,ciLow:st.ciLow,ciHigh:st.ciHigh,dealMin:deal.min,dealMax:deal.max,dealMid:(deal.min!=null&&deal.max!=null)?Math.round((deal.min+deal.max)/2):null,condition:Number(marketState.condition),price:Math.round((asset.price||0)/100),year:Number(String(asset.date||'').slice(0,4))};
+    const res=normalizeAdviceText(payload,allowedNumbers(adv,hold,extra));
     if(!res.ok)throw Error(res.reason||'解读失败');
     marketState.report=res;
   }catch(err){

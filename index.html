@@ -255,11 +255,12 @@ function visionReady(cfg) {
   return !!(cfg && cfg.key && cfg.model && cfg.baseUrl);
 }
 
-function visionTuning(cfg) {
+function visionTuning(cfg, options = {}) {
   const id = String((cfg && cfg.provider) || '');
   const minimax = id === 'minimax' || id === 'minimax-intl';
+  const long = !!options.long;
   return {
-    maxTokens: minimax ? 2048 : 900,
+    maxTokens: long ? (minimax ? 4000 : 3000) : (minimax ? 2048 : 900),
     reasoningEffort: minimax ? 'low' : '',
     imageDetail: minimax ? 'high' : '',
     temperature: minimax ? null : 0
@@ -1911,13 +1912,13 @@ function buildReportPrompt(asset, ctx = {}) {
     '{"market":{"headline":"一句话结论","body":"2-3句解释"},"pricing":{"headline":"一句话结论","body":"2-4句解释"},"holding":{"headline":"一句话结论","body":"2-3句解释"},"action":"sell|wait|hold","risks":["..."],"listings":[{"style":"simple","title":"...","description":"...","tags":["..."]},{"style":"detailed","title":"...","description":"...","tags":["..."]}]}',
     '',
     '写作要求：',
-    '1. 三个板块都必须"结论在前、解释在后"：headline 是一句可直接读的结论，body 解释依据。',
+    '1. 三个板块都必须"结论在前、解释在后"：headline 是一句可直接读的结论，body 解释依据（每段 120 字以内）。',
     '1.1 market.headline 直接写价格区间，例如"市场价 ¥630–¥834"；不要在 headline 里写"影响判断"这类评价。',
     '1.2 样本偏少时，把"样本量偏少，需谨慎参考"写进 body 最后一句或 risks，不要塞进 headline。',
     '2. market 讲价格区间与样本量；pricing 讲为什么推荐这个挂牌价、议价空间；holding 讲持有成本与是否该继续持有。',
     '2.1 着急程度与价格方向必须一致：着急出手 → 价格偏低、议价空间小；不着急 → 价格偏高、议价空间大。禁止写出相反的说法。',
     '3. body 里至少引用两个具体数字（样本量、置信区间、分位价、折扣率任选）。',
-    '4. listings 必须两版：simple 是 30-60 字的简约版；detailed 是 120-200 字的闲鱼风格，包含成色、使用情况、配件、交易方式，让买家信任。',
+    '4. listings 必须两版：simple 是 30-60 字的简约版；detailed 是 100-160 字的闲鱼风格，包含成色、使用情况、配件、交易方式，让买家信任。',
     '5. 不得写价格，不得写"全新""无瑕疵"等未确认表述。',
     '6. 只能使用上面出现过的数字。',
     '7. 挂牌价只依据二手市场样本（分位价、样本量、折扣），不要用购入价或折旧估值推算价格。',
@@ -2500,7 +2501,7 @@ async function generateAssetAll() {
     });
     if (!price.ok) throw Error(price.reason || '没有可用的市场样本');
     const hold = holdingStats(a, price.distribution.p50);
-    const payload = await callChat(buildReportMessages(a, {features: d.form, price, snapshot: snap, hold, condition: d.form.condition}), visionTuning(visionCfg));
+    const payload = await chatJson(buildReportMessages(a, {features: d.form, price, snapshot: snap, hold, condition: d.form.condition}), visionTuning(visionCfg, {long: true}));
     const rep = normalizeReport(payload, reportAllowedNumbers(price, hold, snap));
     if (!rep.ok) throw Error(rep.reason || '报告生成失败');
     d.snapshot = snap;
@@ -2511,7 +2512,7 @@ async function generateAssetAll() {
 
     if (!d.listings) {
       try {
-        const lp = await callChat(buildTwoListingsMessages(a, {features: d.form, price}), visionTuning(visionCfg));
+        const lp = await chatJson(buildTwoListingsMessages(a, {features: d.form, price}), visionTuning(visionCfg, {long: true}));
         const res = normalizeTwoListings(lp);
         if (res.ok) d.listings = res.listings;
         else d.listingError = res.reason || '文案生成失败';
@@ -2731,6 +2732,17 @@ function prepareImageTiles(file,max=1800,maxTiles=3){
     img.onerror=()=>{URL.revokeObjectURL(url);reject(Error('这张图片无法读取，请换一张 JPG 或 PNG'));};
     img.src=url;
   });
+}
+/** 输出被截断/JSON 不完整时，自动放大额度重试一次 */
+async function chatJson(messages,tune){
+  try{return await callChat(messages,tune);}
+  catch(err){
+    const msg=err&&err.message?err.message:'';
+    if(!/JSON 不完整|被截断|JSON 无法解析|没有 JSON/.test(msg))throw err;
+    const bigger={maxTokens:Math.min(8192,Math.round((tune.maxTokens||900)*3)),reasoningEffort:tune.reasoningEffort,imageDetail:tune.imageDetail,temperature:tune.temperature};
+    const nudge=messages.concat([{role:'user',content:'上一条输出被截断或格式错误。请只输出一个完整 JSON：不要 markdown 代码块、不要省略字段、文字尽量精简。'}]);
+    try{return await callChat(nudge,bigger);}catch(err2){const m=err2&&err2.message?err2.message:'JSON 解析失败';throw Error(m+'（已自动放大输出额度重试；若仍失败，请换一个支持更长输出的模型）');}
+  }
 }
 async function callChat(messages,tune){
   const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),90000);

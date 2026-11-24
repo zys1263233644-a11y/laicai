@@ -143,6 +143,9 @@
 .sample-links a{color:#3f4a37;text-decoration:none;border-bottom:1px dotted #c5d0bd}
 .sample-links a:hover{border-bottom-color:#5f6b53}
 
+.range-retry{border:1px dashed #c5d0bd;background:#fbfcf8;color:#8d997d;font-size:11px;border-radius:8px;padding:3px 8px;cursor:pointer}
+.range-retry:hover{border-color:#5f6b53;color:#3f4a37}
+
 </style>
 </head>
 <body>
@@ -2182,7 +2185,10 @@ function monthsSince(dateStr) {
 function rangeCell(a) {
   const r = assetRanges[a.id] || {};
   if (r.status === 'loading') return '<span class="range-loading">查询中…</span>';
-  if (r.status === 'error') return '<span class="range-error">暂不可用</span>';
+  if (r.status === 'error') {
+    const label = /频繁|限流/.test(r.message || '') ? '限流中 · 稍后自动重试' : '暂不可用 · 重试';
+    return '<button class="range-retry" data-action="asset-range-retry" data-id="' + esc(a.id) + '">' + label + '</button>';
+  }
   if (r.status === 'ok' && r.data && r.data.min != null && r.data.max != null) {
     return '¥' + r.data.min + '–¥' + r.data.max;
   }
@@ -2213,20 +2219,85 @@ function refreshAssetGrid() {
   if (grid) grid.innerHTML = assetCardsV2();
 }
 
+const RANGE_KEY = 'laicai.ranges.v1';
+function todayKey() {
+  const d = new Date(Date.now() + 8 * 3600 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+const RANGE_TTL = 30 * 60 * 1000;
+let rangeQueue = [];
+let rangeRunning = false;
+
+function loadRangesFromStorage() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RANGE_KEY) || '{}');
+    const now = Date.now();
+    for (const id of Object.keys(raw)) {
+      const item = raw[id];
+      if (item && item.data && item.date === todayKey()) assetRanges[id] = {status: 'ok', data: item.data, at: item.at || now, date: item.date};
+    }
+  } catch (e) {}
+}
+
+function saveRangesToStorage() {
+  try {
+    const out = {};
+    for (const id of Object.keys(assetRanges)) {
+      const v = assetRanges[id];
+      if (v.status === 'ok') out[id] = {at: v.at || Date.now(), data: v.data, date: v.date || todayKey()};
+    }
+    localStorage.setItem(RANGE_KEY, JSON.stringify(out));
+  } catch (e) {}
+}
+
 function ensureAssetRanges() {
   for (const a of filteredAssets()) {
     const cur = assetRanges[a.id];
     if (cur && (cur.status === 'ok' || cur.status === 'loading')) continue;
-    if (cur && cur.status === 'error' && Date.now() - (cur.at || 0) < 60000) continue;
-    if (rangeInflight >= 3) break;
-    assetRanges[a.id] = {status: 'loading'};
-    rangeInflight++;
-    fetchAssetRange(a, false)
-      .then(data => { assetRanges[a.id] = {status: 'ok', data}; })
-      .catch(() => { assetRanges[a.id] = {status: 'error', at: Date.now()}; })
-      .finally(() => { rangeInflight--; refreshAssetGrid(); ensureAssetRanges(); });
+    if (cur && cur.status === 'error' && Date.now() - (cur.at || 0) < 10000) continue;
+    if (rangeQueue.indexOf(a.id) >= 0) continue;
+    rangeQueue.push(a.id);
+  }
+  pumpRanges();
+}
+
+function retryAssetRange(id) {
+  delete assetRanges[id];
+  rangeQueue = rangeQueue.filter(x => x !== id);
+  refreshAssetGrid();
+  ensureAssetRanges();
+}
+
+async function pumpRanges() {
+  if (rangeRunning) return;
+  rangeRunning = true;
+  try {
+    while (rangeQueue.length) {
+      const id = rangeQueue.shift();
+      const asset = state.assets.find(x => x.id === id);
+      if (!asset) continue;
+      if (assetRanges[id] && assetRanges[id].status === 'ok') continue;
+      assetRanges[id] = {status: 'loading'};
+      refreshAssetGrid();
+      try {
+        const data = await fetchAssetRange(asset, false);
+        assetRanges[id] = {status: 'ok', data, at: Date.now(), date: todayKey()};
+        saveRangesToStorage();
+      } catch (err) {
+        const msg = (err && err.message) || '行情暂不可用';
+        const throttled = /频繁|限流|too many/i.test(msg);
+        assetRanges[id] = {status: 'error', at: Date.now(), message: msg, retryAt: throttled ? Date.now() + 30000 : 0};
+        if (throttled) setTimeout(() => { if (assetRanges[id] && assetRanges[id].status === 'error') retryAssetRange(id); }, 30000);
+      }
+      refreshAssetGrid();
+      await new Promise(r => setTimeout(r, 300));
+    }
+  } finally {
+    rangeRunning = false;
   }
 }
+
+loadRangesFromStorage();
 
 function assetCardsV2() {
   const rows = filteredAssets();
@@ -2273,7 +2344,7 @@ function assetsPageV2() {
     + '</select><button class="text-button" data-action="depreciation">' + icon('info', 14) + ' 估值怎么算</button></div>'
     + '<div class="asset-grid" id="asset-grid">' + assetCardsV2() + '</div>'
     + '<div class="notice" style="margin-top:20px">' + icon('leaf', 16)
-    + '<span>二手行情来自转转在售样本，进入本页时自动刷新一次；折旧估值与平台报价口径不同，不能直接比较。</span></div>'
+    + '<span>二手行情每天更新一次：当天首次打开会查询转转，之后重复刷新都使用当天数据；折旧估值与平台报价口径不同，不能直接比较。</span></div>'
     + '</section>';
 }
 
@@ -2396,6 +2467,10 @@ function renderAssetDetail() {
 }
 
 function detailSnapshot(a, condition) {
+  const cached = assetRanges[a.id];
+  if (cached && cached.status === 'ok' && cached.data && cached.data.snapshot && cached.data.snapshot.listings && cached.data.snapshot.listings.stats && cached.data.snapshot.listings.stats.median != null) {
+    return Promise.resolve(cached.data.snapshot);
+  }
   return fetchAssetRange(a, true).then(r => r.snapshot);
 }
 
@@ -3103,7 +3178,7 @@ function download(name,content,type){const url=URL.createObjectURL(new Blob([con
 function exportCSV(){const cell=v=>'"'+String(v).replace(/^[=+@\-\t\r]/,"'$&").replaceAll('"','""')+'"';const rows=[['日期','交易名称','收支类型','分类','金额（元）','币种','备注'],...[...state.transactions].sort(sortTx).map(t=>[t.date,t.title,t.type==='income'?'收入':'支出',t.category,(t.amount/100).toFixed(2),'CNY',t.note])];download(`来财账本-${today()}.csv`,'\uFEFF'+rows.map(r=>r.map(cell).join(',')).join('\r\n'),'text/csv;charset=utf-8');}
 function parseAndRender(){try{const text=$('#natural-text').value;parsed=parseText(text);if(!parsed.length){$('#parse-results').innerHTML='<div class="notice amber" style="margin-top:20px">没有找到可确认的记录。试试“午饭28元，打车35元”，也可切换手动输入。</div>';return;}$('#parse-results').innerHTML=draftForm(parsed,'本地规则 · 非 AI',`已生成 ${parsed.length} 条草稿。规则可能遗漏信息，请核对原文和金额；无法解析的部分不会入账。`);}catch(e){toast(e.message);}}
 function startVoice(){if(recognition){recognition.stop();recognition=null;return;}const Speech=window.SpeechRecognition||window.webkitSpeechRecognition;if(!Speech){$('#voice-hint').textContent='当前浏览器不支持语音输入，请在下方直接输入文字。';return;}try{recognition=new Speech();recognition.lang='zh-CN';recognition.interimResults=false;recognition.continuous=false;recognition.onstart=()=>{$('.voice-button')?.classList.add('listening');if($('#voice-hint'))$('#voice-hint').textContent='正在聆听…再点一次停止';};recognition.onresult=e=>{if($('#natural-text'))$('#natural-text').value+=e.results[0][0].transcript;};recognition.onerror=e=>{if($('#voice-hint'))$('#voice-hint').textContent=e.error==='not-allowed'?'麦克风权限未获准，请使用文字输入。':'语音服务暂不可用，请直接输入文字。';};recognition.onend=()=>{recognition=null;$('.voice-button')?.classList.remove('listening');if($('#voice-hint')?.textContent.includes('聆听'))$('#voice-hint').textContent='录音结束，请核对文字并生成待确认记录';};recognition.start();}catch{recognition=null;toast('语音服务不可用，可以直接输入文字');}}
-document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'asset-detail':openAssetDetail(id,b.dataset.tab);break;case 'asset-generate':generateAssetAll();break;case 'asset-copy':copyAssetListing(b.dataset.style);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'market-listing-copy':copyListingText();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
+document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'asset-detail':openAssetDetail(id,b.dataset.tab);break;case 'asset-generate':generateAssetAll();break;case 'asset-range-retry':retryAssetRange(id);break;case 'asset-copy':copyAssetListing(b.dataset.style);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'market-listing-copy':copyListingText();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
 case 'account':openAccountEntry();break;
 case 'login':loginModal();break;
 case 'send-code':doSendCode();break;

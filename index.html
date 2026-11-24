@@ -1188,6 +1188,46 @@ function priceStats(prices) {
   return {count: list.length, min: list[0], p10: at(0.1), p25: at(0.25), median: mid, p75: at(0.75), p90: at(0.9), max: list[list.length - 1]};
 }
 
+/** 分位点（线性插值取最近的样本值） */
+function quantileAt(sorted, q) {
+  if (!sorted.length) return null;
+  const i = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * q)));
+  return sorted[i];
+}
+
+/**
+ * 价格区间：Q1-1.5IQR ~ Q3+1.5IQR，并裁到样本实际范围。
+ * 样本最小值比下围高时用最小值；最大值比上围低时用最大值。
+ */
+function tukeyRange(prices) {
+  const list = (prices || []).filter(n => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+  if (!list.length) return null;
+  const q1 = quantileAt(list, 0.25);
+  const q3 = quantileAt(list, 0.75);
+  const iqr = q3 - q1;
+  const lowFence = q1 - 1.5 * iqr;
+  const highFence = q3 + 1.5 * iqr;
+  return {
+    q1,
+    q3,
+    iqr,
+    rangeMin: Math.round(Math.max(list[0], lowFence)),
+    rangeMax: Math.round(Math.min(list[list.length - 1], highFence))
+  };
+}
+
+/** 95% 置信区间：用样本推断总体均值（mean ± 1.96·s/√n） */
+function meanCI(prices) {
+  const list = (prices || []).filter(n => Number.isFinite(n) && n > 0);
+  const n = list.length;
+  if (n < 5) return {mean: n ? Math.round(list.reduce((a, b) => a + b, 0) / n) : null, sd: null, low: null, high: null};
+  const mean = list.reduce((a, b) => a + b, 0) / n;
+  const variance = list.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (n - 1);
+  const sd = Math.sqrt(variance);
+  const half = 1.96 * sd / Math.sqrt(n);
+  return {mean: Math.round(mean), sd: Math.round(sd), low: Math.round(mean - half), high: Math.round(mean + half)};
+}
+
 /** 加权中位数：同成色权重 1，相邻档 0.6，其他 0.3 */
 function weightedMedian(pairs) {
   const list = (pairs || []).filter(x => Number.isFinite(x.v) && x.v > 0 && Number.isFinite(x.w) && x.w > 0)
@@ -1263,7 +1303,15 @@ function buildSnapshot(input) {
   const stats = priceStats(prices);
   if (usedSubset && prices.length) stats.median = weightedMedian(prices.map((v, i) => ({v, w: weights[i]})));
 
-  const ci = bootstrapCI(prices, {rand});
+  const tk = tukeyRange(prices);
+  const ci = meanCI(prices);
+  stats.q1 = tk ? tk.q1 : null;
+  stats.q3 = tk ? tk.q3 : null;
+  stats.iqr = tk ? tk.iqr : null;
+  stats.rangeMin = tk ? tk.rangeMin : null;
+  stats.rangeMax = tk ? tk.rangeMax : null;
+  stats.mean = ci.mean;
+  stats.sd = ci.sd;
   stats.ciLow = ci.low;
   stats.ciHigh = ci.high;
 
@@ -1776,8 +1824,6 @@ function estimatePrice(snapshot, features = {}) {
   const snap = snapshot || {};
   const st = (snap.listings && snap.listings.stats) || {};
   const sub = snap.subset || {};
-  const cal = snap.calibration || {};
-  const prices = (snap.listings && snap.listings.sample) ? [] : [];
   const dist = (snap.listings && snap.listings.distribution) || null;
   const median = Number.isFinite(st.median) ? st.median : null;
 
@@ -1785,16 +1831,14 @@ function estimatePrice(snapshot, features = {}) {
 
   const baseFactor = sub.used ? 1 : conditionFactor(features.condition || '95');
   const adjust = featureAdjust(features);
-  const delta = Number.isFinite(cal.delta) ? cal.delta : 1;
 
-  const scaled = (v) => Math.round(v * baseFactor * adjust * delta);
+  const scaled = (v) => Math.round(v * baseFactor * adjust);
   const d = dist || {p10: st.p10, p25: st.p25, p50: st.median, p75: st.p75, p90: st.p90};
   const out = {
     ok: true,
     base: median,
     factor: baseFactor,
     adjust,
-    calibration: delta,
     distribution: {
       p10: scaled(d.p10 != null ? d.p10 : st.p25),
       p25: scaled(d.p25 != null ? d.p25 : st.p25),
@@ -1809,6 +1853,18 @@ function estimatePrice(snapshot, features = {}) {
       subsetUsed: !!sub.used,
       subsetCount: sub.count || 0,
       condition: conditionLabel(features.condition || '95')
+    },
+    range: {
+      min: Number.isFinite(st.rangeMin) ? scaled(st.rangeMin) : null,
+      max: Number.isFinite(st.rangeMax) ? scaled(st.rangeMax) : null,
+      q1: Number.isFinite(st.q1) ? st.q1 : null,
+      q3: Number.isFinite(st.q3) ? st.q3 : null,
+      iqr: Number.isFinite(st.iqr) ? st.iqr : null
+    },
+    meanCI: {
+      mean: Number.isFinite(st.mean) ? scaled(st.mean) : null,
+      low: Number.isFinite(st.ciLow) ? scaled(st.ciLow) : null,
+      high: Number.isFinite(st.ciHigh) ? scaled(st.ciHigh) : null
     },
     notes: ageNote(features.ageMonths, median)
   };
@@ -1842,7 +1898,6 @@ function reportAllowedNumbers(price, hold, snap) {
   add(d.p10); add(d.p25); add(d.p50); add(d.p75); add(d.p90);
   add(p.recommended); add(p.base);
   if (Number.isFinite(p.buffer)) add(p.buffer * 100);
-  if (Number.isFinite(p.calibration)) add(p.calibration * 100);
   if (p.ci) { add(p.ci.low); add(p.ci.high); }
   const h = hold || {};
   if (h.current != null) add(h.current / 100);
@@ -1856,8 +1911,6 @@ function reportAllowedNumbers(price, hold, snap) {
   add(listing.rawCount); add(listing.count); add(listing.removed);
   const sub = (snap && snap.subset) || {};
   add(sub.count);
-  const deal = (snap && snap.deal) || {};
-  add(deal.min); add(deal.max);
   // 分位标签（P10/P25/...）与“95% 置信区间”里的数字本身不是价格，允许出现
   for (const n of [10, 25, 50, 75, 90, 95]) add(n);
   const extra = (snap && snap.extraNumbers) || {};
@@ -1874,8 +1927,6 @@ function buildReportPrompt(asset, ctx = {}) {
   const st = (snap.listings && snap.listings.stats) || {};
   const sub = snap.subset || {};
   const listingInfo = snap.listings || {};
-  const cal = snap.calibration || {};
-  const deal = snap.deal || {};
   const yuan = (v) => (Number.isFinite(v) ? Math.round(v) : null);
 
   return [
@@ -1893,9 +1944,8 @@ function buildReportPrompt(asset, ctx = {}) {
     '原始 ' + (listingInfo.rawCount || 0) + ' 条，剔除 ' + (listingInfo.removed || 0) + ' 条，进入统计 ' + (listingInfo.count || 0) + ' 条',
     '同成色筛选：' + (sub.used ? ('已启用，' + (sub.count || 0) + ' 条') : '未启用'),
     '价格分布 P10/P25/P50/P75/P90：' + [d.p10, d.p25, d.p50, d.p75, d.p90].map(v => (v == null ? '未知' : v)).join(' / '),
-    '95% 置信区间：' + (price.ci && price.ci.low != null ? price.ci.low + ' - ' + price.ci.high : '未知'),
-    '成交区间：' + (deal.min != null ? deal.min + ' - ' + deal.max : '未知'),
-    '挂牌到成交折扣：' + (cal.delta != null ? Math.round(cal.delta * 100) + '%' : '未获取'),
+    '95% 置信区间（总体均值，mean±1.96·s/√n）：' + (price.meanCI && price.meanCI.low != null ? price.meanCI.low + ' - ' + price.meanCI.high : '未知'),
+    '价格区间（Q1-1.5IQR 到 Q3+1.5IQR，已裁到样本实际范围）：' + (price.range && price.range.min != null ? price.range.min + ' - ' + price.range.max : '未知'),
     '置信程度：' + ((price.confidence && price.confidence.label) || '未知'),
     '',
     '推荐挂牌：' + (price.recommended != null ? price.recommended : '未知') + ' 元（预留 ' + (price.buffer != null ? Math.round(price.buffer * 100) : '未知') + '% 议价空间）',
@@ -1913,7 +1963,8 @@ function buildReportPrompt(asset, ctx = {}) {
     '',
     '写作要求：',
     '1. 三个板块都必须"结论在前、解释在后"：headline 是一句可直接读的结论，body 解释依据（每段 120 字以内）。',
-    '1.1 market.headline 直接写价格区间，例如"市场价 ¥630–¥834"；不要在 headline 里写"影响判断"这类评价。',
+    '1.1 market.headline 必须直接写价格区间，且数字必须与上面「价格区间」完全一致；不要在 headline 里写"影响判断"这类评价。',
+    '1.3 market.body 要说明：价格区间由四分位距法（Q1-1.5IQR 到 Q3+1.5IQR，并裁到样本实际范围）得到；95% 置信区间是用样本推断总体均值的范围，不是价格波动范围。',
     '1.2 样本偏少时，把"样本量偏少，需谨慎参考"写进 body 最后一句或 risks，不要塞进 headline。',
     '2. market 讲价格区间与样本量；pricing 讲为什么推荐这个挂牌价、议价空间；holding 讲持有成本与是否该继续持有。',
     '2.1 着急程度与价格方向必须一致：着急出手 → 价格偏低、议价空间小；不着急 → 价格偏高、议价空间大。禁止写出相反的说法。',
@@ -2212,8 +2263,8 @@ function fetchAssetRange(asset, full) {
       const d = body.data || {};
       const deal = d.deal || {};
       const st = (d.listings && d.listings.stats) || {};
-      const min = deal.min != null ? deal.min : st.p25;
-      const max = deal.max != null ? deal.max : st.p75;
+      const min = st.rangeMin != null ? st.rangeMin : (deal.min != null ? deal.min : st.p25);
+      const max = st.rangeMax != null ? st.rangeMax : (deal.max != null ? deal.max : st.p75);
       if (min == null || max == null) throw Error('暂无行情');
       return {min, max, median: st.median, count: (d.listings && d.listings.count) || 0, snapshot: d};
     });
@@ -2449,7 +2500,7 @@ function assetDetailPanel() {
   const lowConfidence = d.price && d.price.confidence && d.price.confidence.level === 'low';
   return '<div class="detail-metrics">'
     + (d.price ? '<div><small>推荐挂牌</small><strong>¥' + d.price.recommended + '</strong></div>'
-      + '<div><small>价格区间</small><strong>¥' + d.price.distribution.p25 + '–¥' + d.price.distribution.p75 + '</strong></div>'
+      + '<div><small>价格区间</small><strong>¥' + (d.price.range.min != null ? d.price.range.min : d.price.distribution.p25) + '–¥' + (d.price.range.max != null ? d.price.range.max : d.price.distribution.p75) + '</strong></div>'
       + '<div><small>样本量</small><strong>' + d.price.basis.count + ' 条</strong></div>' : '')
     + '</div>'
     + '<p class="panel-note">定价口径：' + (d.form.urgency === 'fast' ? '着急出手 → 取较低价位（P25 附近），议价空间小' : d.form.urgency === 'patient' ? '不着急 → 取较高价位（P75 附近），议价空间大' : '一般 → 取中间价位（P50 附近）') + '</p>'
@@ -2500,7 +2551,7 @@ async function generateAssetAll() {
       urgency: d.form.urgency
     });
     if (!price.ok) throw Error(price.reason || '没有可用的市场样本');
-    const hold = holdingStats(a, price.distribution.p50);
+    const hold = holdingStats(a, price.recommended);
     const payload = await chatJson(buildReportMessages(a, {features: d.form, price, snapshot: snap, hold, condition: d.form.condition}), visionTuning(visionCfg, {long: true}));
     const rep = normalizeReport(payload, reportAllowedNumbers(price, hold, snap));
     if (!rep.ok) throw Error(rep.reason || '报告生成失败');

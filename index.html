@@ -1982,7 +1982,7 @@ function buildReportPrompt(asset, ctx = {}) {
     '',
     '样本与统计：',
     '原始 ' + (listingInfo.rawCount || 0) + ' 条，剔除 ' + (listingInfo.removed || 0) + ' 条，进入统计 ' + (listingInfo.count || 0) + ' 条',
-    '同成色筛选：' + (sub.used ? ('已启用，' + (sub.count || 0) + ' 条') : '未启用'),
+    '同成色筛选：' + (sub.used ? ('已启用，' + (sub.count || 0) + ' 条') : '未启用（样本不足，按全部样本计算）'),
     (snap.recognized && snap.recognized.name ? ('识别型号：' + snap.recognized.name + (snap.recognized.level === 'LOW' || snap.recognized.level === 'UNKNOWN' ? '（匹配置信度偏低）' : '')) : '识别型号：未识别'),
     (snap.modelFilter && snap.modelFilter.applied ? ('型号筛选：已按「' + (snap.modelFilter.tokens || []).join('、') + '」过滤，剔除 ' + (snap.modelFilter.dropped || 0) + ' 条同系列其他型号') : '型号筛选：未启用'),
     '价格分位（仅用于说明挂牌价依据）：P25 ' + (d.p25 == null ? '未知' : d.p25) + '，P50 ' + (d.p50 == null ? '未知' : d.p50) + '，P75 ' + (d.p75 == null ? '未知' : d.p75),
@@ -2336,10 +2336,19 @@ function fetchAssetRange(asset, full, keyword) {
       const d = body.data || {};
       const deal = d.deal || {};
       const st = (d.listings && d.listings.stats) || {};
-      const min = st.rangeMin != null ? st.rangeMin : (deal.min != null ? deal.min : st.p25);
-      const max = st.rangeMax != null ? st.rangeMax : (deal.max != null ? deal.max : st.p75);
-      if (min == null || max == null) throw Error('暂无行情');
       if (!snapshotUsable(d)) throw Error('行情数据版本过旧，请刷新页面');
+      // 与子页默认参数保持一致：95新 + 保修状态，其余默认
+      const defaults = {
+        condition: '95',
+        warranty: !!(asset.warrantyDate && asset.warrantyDate >= today()),
+        fullBox: false,
+        functional: true,
+        ageMonths: monthsSince(asset.date)
+      };
+      const est = estimatePrice(d, defaults);
+      const min = est.ok && est.range.min != null ? est.range.min : (st.rangeMin != null ? st.rangeMin : (deal.min != null ? deal.min : st.p25));
+      const max = est.ok && est.range.max != null ? est.range.max : (st.rangeMax != null ? st.rangeMax : (deal.max != null ? deal.max : st.p75));
+      if (min == null || max == null) throw Error('暂无行情');
       return {min, max, median: st.median, count: (d.listings && d.listings.count) || 0, snapshot: d};
     });
 }

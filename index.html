@@ -146,6 +146,8 @@
 .range-retry{border:1px dashed #c5d0bd;background:#fbfcf8;color:#8d997d;font-size:11px;border-radius:8px;padding:3px 8px;cursor:pointer}
 .range-retry:hover{border-color:#5f6b53;color:#3f4a37}
 
+.range-wide{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:999px;background:#fdf3e4;color:#a4763c;font-size:10px;font-weight:400;vertical-align:middle}
+
 </style>
 </head>
 <body>
@@ -1918,7 +1920,8 @@ function buildReportPrompt(asset, ctx = {}) {
     '4. listings 必须两版：simple 是 30-60 字的简约版；detailed 是 120-200 字的闲鱼风格，包含成色、使用情况、配件、交易方式，让买家信任。',
     '5. 不得写价格，不得写"全新""无瑕疵"等未确认表述。',
     '6. 只能使用上面出现过的数字。',
-    '7. 挂牌价只依据二手市场样本（分位价、样本量、折扣），不要用购入价或折旧估值推算价格。'
+    '7. 挂牌价只依据二手市场样本（分位价、样本量、折扣），不要用购入价或折旧估值推算价格。',
+    '8. 若成交区间（最高-最低）/最高 ≥ 50%，不要把它当作精确区间，用"高值/低值"描述并说明主要受成色与容量影响。'
   ].join('\n');
 }
 
@@ -2190,7 +2193,8 @@ function rangeCell(a) {
     return '<button class="range-retry" data-action="asset-range-retry" data-id="' + esc(a.id) + '">' + label + '</button>';
   }
   if (r.status === 'ok' && r.data && r.data.min != null && r.data.max != null) {
-    return '¥' + r.data.min + '–¥' + r.data.max;
+    const wide = r.data.max > 0 && (r.data.max - r.data.min) / r.data.max >= 0.5;
+    return '¥' + r.data.min + '–¥' + r.data.max + (wide ? '<span class="range-wide">区间宽</span>' : '');
   }
   return '<span class="range-empty">—</span>';
 }

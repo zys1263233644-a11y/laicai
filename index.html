@@ -1944,8 +1944,9 @@ function buildReportPrompt(asset, ctx = {}) {
     '原始 ' + (listingInfo.rawCount || 0) + ' 条，剔除 ' + (listingInfo.removed || 0) + ' 条，进入统计 ' + (listingInfo.count || 0) + ' 条',
     '同成色筛选：' + (sub.used ? ('已启用，' + (sub.count || 0) + ' 条') : '未启用'),
     '价格分布 P10/P25/P50/P75/P90：' + [d.p10, d.p25, d.p50, d.p75, d.p90].map(v => (v == null ? '未知' : v)).join(' / '),
-    '95% 置信区间（总体均值，mean±1.96·s/√n）：' + (price.meanCI && price.meanCI.low != null ? price.meanCI.low + ' - ' + price.meanCI.high : '未知'),
-    '价格区间（Q1-1.5IQR 到 Q3+1.5IQR，已裁到样本实际范围）：' + (price.range && price.range.min != null ? price.range.min + ' - ' + price.range.max : '未知'),
+    '价格区间（四分位距法）：' + (price.range && price.range.min != null ? price.range.min + ' - ' + price.range.max : '未知') + ' 元',
+    '样本平均价：' + (price.meanCI && price.meanCI.mean != null ? price.meanCI.mean : '未知') + ' 元',
+    '均值的 95% 置信区间：' + (price.meanCI && price.meanCI.low != null ? price.meanCI.low + ' - ' + price.meanCI.high : '未知') + ' 元',
     '置信程度：' + ((price.confidence && price.confidence.label) || '未知'),
     '',
     '推荐挂牌：' + (price.recommended != null ? price.recommended : '未知') + ' 元（预留 ' + (price.buffer != null ? Math.round(price.buffer * 100) : '未知') + '% 议价空间）',
@@ -1962,18 +1963,22 @@ function buildReportPrompt(asset, ctx = {}) {
     '{"market":{"headline":"一句话结论","body":"2-3句解释"},"pricing":{"headline":"一句话结论","body":"2-4句解释"},"holding":{"headline":"一句话结论","body":"2-3句解释"},"action":"sell|wait|hold","risks":["..."],"listings":[{"style":"simple","title":"...","description":"...","tags":["..."]},{"style":"detailed","title":"...","description":"...","tags":["..."]}]}',
     '',
     '写作要求：',
-    '1. 三个板块都必须"结论在前、解释在后"：headline 是一句可直接读的结论，body 解释依据（每段 120 字以内）。',
-    '1.1 market.headline 必须直接写价格区间，且数字必须与上面「价格区间」完全一致；不要在 headline 里写"影响判断"这类评价。',
-    '1.3 market.body 要说明：价格区间由四分位距法（Q1-1.5IQR 到 Q3+1.5IQR，并裁到样本实际范围）得到；95% 置信区间是用样本推断总体均值的范围，不是价格波动范围。',
-    '1.2 样本偏少时，把"样本量偏少，需谨慎参考"写进 body 最后一句或 risks，不要塞进 headline。',
-    '2. market 讲价格区间与样本量；pricing 讲为什么推荐这个挂牌价、议价空间；holding 讲持有成本与是否该继续持有。',
+    '1. 每个板块都是“结论在前、解释在后”：headline 是一句能直接读的结论，body 用 2-4 句说明依据，整段不超过 120 字。',
+    '1.1 market.headline 直接写价格区间，数字必须与上面「价格区间」完全一致，不要加“影响判断”之类的评价。',
+    '1.2 样本少于 30 条时，把“样本偏少，结论仅供参考”放进 body 最后一句或 risks，不要塞进 headline。',
+    '1.3 market.body 按这个顺序写，用词专业、句子简洁（不要口语化）：① 统计了多少条同成色样本；② 用四分位距法算出的价格区间是多少；③ 样本的市场平均价格是多少，其 95% 置信区间是多少，并解释为“我们有 95% 的把握认为，该市场的总体真实平均价格落在这一区间内”；④ 样本少时补一句提醒。',
+    '1.4 禁止出现这些写法：裁至样本实际范围、Q1、Q3、IQR、1.5倍四分位距、P10、P90、mean±1.96、反映总体均值的估计范围、“虽未达大样本”。',
+    '1.5 同一个数字不要重复说两遍；不要用“看了”“一堆”“挺贵”这类口语说法，统一用“统计”“样本”“价格区间”等标准表述。',
+    '1.6 参考写法（只学句式，数字用上面给的）：本次统计了 50 条同成色在售样本，采用四分位距法计算的价格区间为 2242 至 4466 元。样本的市场平均价格为 3172 元，其 95% 置信区间为 2859 至 3486 元，即我们有 95% 的把握认为，该市场的总体真实平均价格落在 2859 元至 3486 元之间。',
+    '1.7 如果价格区间跨度很大（上限超过下限的 2 倍），要说明这是成色和容量差异造成的，不要当作精确值。',
+    '2. market 讲价格区间和样本量；pricing 讲为什么推荐这个挂牌价、留了多少议价空间；holding 讲持有成本与继续持有是否划算。',
     '2.1 着急程度与价格方向必须一致：着急出手 → 价格偏低、议价空间小；不着急 → 价格偏高、议价空间大。禁止写出相反的说法。',
-    '3. body 里至少引用两个具体数字（样本量、置信区间、分位价、折扣率任选）。',
-    '4. listings 必须两版：simple 是 30-60 字的简约版；detailed 是 100-160 字的闲鱼风格，包含成色、使用情况、配件、交易方式，让买家信任。',
-    '5. 不得写价格，不得写"全新""无瑕疵"等未确认表述。',
-    '6. 只能使用上面出现过的数字。',
-    '7. 挂牌价只依据二手市场样本（分位价、样本量、折扣），不要用购入价或折旧估值推算价格。',
-    '8. 若成交区间（最高-最低）/最高 ≥ 50%，不要把它当作精确区间，用"高值/低值"描述并说明主要受成色与容量影响。'
+    '3. 每个 body 至少引用两个具体数字（样本量、价格区间、平均价、置信区间任选）。',
+    '4. listings 必须两版：simple 30-60 字，讲清型号、成色、卖点；detailed 100-160 字，闲鱼风格，包含成色、使用情况、配件、交易方式，让买家信任。',
+    '5. 文案里不写价格，不写“全新”“无瑕疵”等未经确认的表述。',
+    '6. 只能使用上面出现过的数字，不得自行计算新价格。',
+    '7. 挂牌价只依据市场样本（分位价、样本量），不要用购入价或折旧估值推算。',
+    '8. 全文要求专业但不晦涩：结论明确、依据清楚，避免术语堆砌，也不要写成口语闲聊。'
   ].join('\n');
 }
 
@@ -1995,12 +2000,35 @@ function reportNumbersIn(text) {
   return out;
 }
 
+const BANNED_PHRASES = [
+  /裁至样本实际范围/g,
+  /已裁到样本实际范围/g,
+  /（?Q1\s*-\s*1\.5\s*IQR\s*到\s*Q3\s*\+\s*1\.5\s*IQR）?/gi,
+  /1\.5\s*倍四分位距/gi,
+  /\bQ1\b/gi,
+  /\bQ3\b/gi,
+  /\bIQR\b/gi,
+  /\bP10\b/gi,
+  /\bP90\b/gi,
+  /反映总体均值的估计范围/g
+];
+
+function scrub(text) {
+  let out = String(text == null ? '' : text);
+  for (const re of BANNED_PHRASES) out = out.replace(re, '');
+  out = out.replace(/[，,]\s*后为/g, '为')
+           .replace(/[，,]\s*。/g, '。')
+           .replace(/。\s*[，,]/g, '。')
+           .replace(/[，,]\s*[，,]+/g, '，');
+  return out.replace(/\s{2,}/g, ' ').replace(/^[，。、；\s]+/, '').trim();
+}
+
 function section(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
   const headline = String(src.headline || '').trim();
   const body = String(src.body || '').trim();
   if (!headline && !body) return null;
-  return {headline: headline.slice(0, 60), body: body.slice(0, 600)};
+  return {headline: scrub(headline).slice(0, 60), body: scrub(body).slice(0, 600)};
 }
 
 function listingOf(raw, style) {

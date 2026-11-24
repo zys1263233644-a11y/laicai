@@ -1943,7 +1943,7 @@ function buildReportPrompt(asset, ctx = {}) {
     '样本与统计：',
     '原始 ' + (listingInfo.rawCount || 0) + ' 条，剔除 ' + (listingInfo.removed || 0) + ' 条，进入统计 ' + (listingInfo.count || 0) + ' 条',
     '同成色筛选：' + (sub.used ? ('已启用，' + (sub.count || 0) + ' 条') : '未启用'),
-    '价格分布 P10/P25/P50/P75/P90：' + [d.p10, d.p25, d.p50, d.p75, d.p90].map(v => (v == null ? '未知' : v)).join(' / '),
+    '价格分位（仅用于说明挂牌价依据）：P25 ' + (d.p25 == null ? '未知' : d.p25) + '，P50 ' + (d.p50 == null ? '未知' : d.p50) + '，P75 ' + (d.p75 == null ? '未知' : d.p75),
     '价格区间（四分位距法）：' + (price.range && price.range.min != null ? price.range.min + ' - ' + price.range.max : '未知') + ' 元',
     '样本平均价：' + (price.meanCI && price.meanCI.mean != null ? price.meanCI.mean : '未知') + ' 元',
     '均值的 95% 置信区间：' + (price.meanCI && price.meanCI.low != null ? price.meanCI.low + ' - ' + price.meanCI.high : '未知') + ' 元',
@@ -1969,6 +1969,7 @@ function buildReportPrompt(asset, ctx = {}) {
     '1.3 market.body 按这个顺序写，用词专业、句子简洁（不要口语化）：① 统计了多少条同成色样本；② 用四分位距法算出的价格区间是多少；③ 样本的市场平均价格是多少，其 95% 置信区间是多少，并解释为“我们有 95% 的把握认为，该市场的总体真实平均价格落在这一区间内”；④ 样本少时补一句提醒。',
     '1.4 禁止出现这些写法：裁至样本实际范围、Q1、Q3、IQR、1.5倍四分位距、P10、P90、mean±1.96、反映总体均值的估计范围、“虽未达大样本”。',
     '1.5 同一个数字不要重复说两遍；不要用“看了”“一堆”“挺贵”这类口语说法，统一用“统计”“样本”“价格区间”等标准表述。',
+    '1.55 如果某项数据是“未知”，不要写进正文（不要出现“未知元”“未知”），直接省略那一句。',
     '1.6 参考写法（只学句式，数字用上面给的）：本次统计了 50 条同成色在售样本，采用四分位距法计算的价格区间为 2242 至 4466 元。样本的市场平均价格为 3172 元，其 95% 置信区间为 2859 至 3486 元，即我们有 95% 的把握认为，该市场的总体真实平均价格落在 2859 元至 3486 元之间。',
     '1.7 如果价格区间跨度很大（上限超过下限的 2 倍），要说明这是成色和容量差异造成的，不要当作精确值。',
     '2. market 讲价格区间和样本量；pricing 讲为什么推荐这个挂牌价、留了多少议价空间；holding 讲持有成本与继续持有是否划算。',
@@ -2010,7 +2011,10 @@ const BANNED_PHRASES = [
   /\bIQR\b/gi,
   /\bP10\b/gi,
   /\bP90\b/gi,
-  /反映总体均值的估计范围/g
+  /反映总体均值的估计范围/g,
+  /[，,]?\s*(样本的?市场?)?平均价格为?未知元?/g,
+  /[，,]?\s*为?未知元/g,
+  /[，,]?\s*未知元/g
 ];
 
 function scrub(text) {
@@ -2294,6 +2298,7 @@ function fetchAssetRange(asset, full) {
       const min = st.rangeMin != null ? st.rangeMin : (deal.min != null ? deal.min : st.p25);
       const max = st.rangeMax != null ? st.rangeMax : (deal.max != null ? deal.max : st.p75);
       if (min == null || max == null) throw Error('暂无行情');
+      if (!snapshotUsable(d)) throw Error('行情数据版本过旧，请刷新页面');
       return {min, max, median: st.median, count: (d.listings && d.listings.count) || 0, snapshot: d};
     });
 }
@@ -2304,6 +2309,13 @@ function refreshAssetGrid() {
 }
 
 const RANGE_KEY = 'laicai.ranges.v1';
+const RANGE_VERSION = 2;
+
+/** 旧口径快照（缺 mean / Tukey 区间）视为不可用 */
+function snapshotUsable(snap) {
+  const st = snap && snap.listings && snap.listings.stats;
+  return !!(st && Number.isFinite(st.mean) && Number.isFinite(st.rangeMin) && Number.isFinite(st.rangeMax));
+}
 function todayKey() {
   const d = new Date(Date.now() + 8 * 3600 * 1000);
   return d.toISOString().slice(0, 10);
@@ -2318,7 +2330,9 @@ function loadRangesFromStorage() {
     const now = Date.now();
     for (const id of Object.keys(raw)) {
       const item = raw[id];
-      if (item && item.data && item.date === todayKey()) assetRanges[id] = {status: 'ok', data: item.data, at: item.at || now, date: item.date};
+      if (item && item.v === RANGE_VERSION && item.data && item.date === todayKey() && snapshotUsable(item.data.snapshot)) {
+        assetRanges[id] = {status: 'ok', data: item.data, at: item.at || now, date: item.date};
+      }
     }
   } catch (e) {}
 }
@@ -2328,7 +2342,7 @@ function saveRangesToStorage() {
     const out = {};
     for (const id of Object.keys(assetRanges)) {
       const v = assetRanges[id];
-      if (v.status === 'ok') out[id] = {at: v.at || Date.now(), data: v.data, date: v.date || todayKey()};
+      if (v.status === 'ok' && snapshotUsable(v.data && v.data.snapshot)) out[id] = {v: RANGE_VERSION, at: v.at || Date.now(), data: v.data, date: v.date || todayKey()};
     }
     localStorage.setItem(RANGE_KEY, JSON.stringify(out));
   } catch (e) {}
@@ -2552,10 +2566,22 @@ function renderAssetDetail() {
 
 function detailSnapshot(a, condition) {
   const cached = assetRanges[a.id];
-  if (cached && cached.status === 'ok' && cached.data && cached.data.snapshot && cached.data.snapshot.listings && cached.data.snapshot.listings.stats && cached.data.snapshot.listings.stats.median != null) {
+  if (cached && cached.status === 'ok' && cached.data && snapshotUsable(cached.data.snapshot)) {
     return Promise.resolve(cached.data.snapshot);
   }
   return fetchAssetRange(a, true).then(r => r.snapshot);
+}
+
+/** 模型写的 headline 必须包含真实区间的两个数字，否则用区间重写 */
+function alignHeadline(rep, price) {
+  if (!rep || !rep.market) return rep;
+  const r = (price && price.range) || {};
+  if (r.min == null || r.max == null) return rep;
+  const h = String(rep.market.headline || '');
+  if (!h.includes(String(r.min)) || !h.includes(String(r.max))) {
+    rep.market = {headline: '价格区间为 ¥' + r.min + '–¥' + r.max, body: rep.market.body || ''};
+  }
+  return rep;
 }
 
 async function generateAssetAll() {
@@ -2581,7 +2607,7 @@ async function generateAssetAll() {
     if (!price.ok) throw Error(price.reason || '没有可用的市场样本');
     const hold = holdingStats(a, price.recommended);
     const payload = await chatJson(buildReportMessages(a, {features: d.form, price, snapshot: snap, hold, condition: d.form.condition}), visionTuning(visionCfg, {long: true}));
-    const rep = normalizeReport(payload, reportAllowedNumbers(price, hold, snap));
+    const rep = alignHeadline(normalizeReport(payload, reportAllowedNumbers(price, hold, snap)), price);
     if (!rep.ok) throw Error(rep.reason || '报告生成失败');
     d.snapshot = snap;
     d.price = price;

@@ -1807,26 +1807,6 @@ function estimatePrice(snapshot, features = {}) {
     notes: ageNote(features.ageMonths, median)
   };
 
-  // 年限先验：用折旧估值当 prior，按样本量做加权（样本越少越信先验）
-  const priorYuan = Number.isFinite(features.priorYuan) && features.priorYuan > 0 ? features.priorYuan : null;
-  const n = out.basis.count || 0;
-  const weight = priorYuan == null ? 1 : Math.min(0.9, n / (n + 8));
-  if (priorYuan != null) {
-    const rawP50 = out.distribution.p50;
-    const blended = Math.round(rawP50 * weight + priorYuan * (1 - weight));
-    const ratio = rawP50 > 0 ? blended / rawP50 : 1;
-    out.distribution = {
-      p10: Math.round(out.distribution.p10 * ratio),
-      p25: Math.round(out.distribution.p25 * ratio),
-      p50: blended,
-      p75: Math.round(out.distribution.p75 * ratio),
-      p90: Math.round(out.distribution.p90 * ratio)
-    };
-    out.prior = priorYuan;
-    out.weight = Math.round(weight * 100) / 100;
-    out.notes.push('已用折旧估值 ¥' + priorYuan + ' 做先验，样本权重 ' + Math.round(weight * 100) + '%');
-  }
-
   const urgency = ['fast', 'normal', 'patient'].includes(features.urgency) ? features.urgency : 'normal';
   const pick = urgency === 'fast' ? out.distribution.p25 : urgency === 'patient' ? out.distribution.p75 : out.distribution.p50;
   const buffer = urgency === 'fast' ? 0.03 : urgency === 'patient' ? 0.12 : 0.07;
@@ -1913,6 +1893,11 @@ function buildReportPrompt(asset, ctx = {}) {
     '置信程度：' + ((price.confidence && price.confidence.label) || '未知'),
     '',
     '推荐挂牌：' + (price.recommended != null ? price.recommended : '未知') + ' 元（预留 ' + (price.buffer != null ? Math.round(price.buffer * 100) : '未知') + '% 议价空间）',
+    '定价口径：' + (f.urgency === 'fast'
+      ? '着急出手 → 取 P25 附近并压缩议价空间，价格应偏低'
+      : f.urgency === 'patient'
+        ? '不着急 → 取 P75 附近并留足议价空间，价格可以偏高'
+        : '一般 → 取 P50 附近，价格居中'),
     '',
     '持有情况：持有 ' + (hold.days != null ? hold.days : '未知') + ' 天，当前市值 ' + (yuan(hold.current != null ? hold.current / 100 : null) != null ? yuan(hold.current / 100) : '未知') + ' 元，保值率 ' + (hold.ratio != null ? Math.round(hold.ratio * 100) + '%' : '未知') + '，日均成本 ' + (hold.daily != null ? (hold.daily / 100).toFixed(2) : '未知') + ' 元',
     '是否着急出售：' + (f.urgency === 'fast' ? '着急出手' : f.urgency === 'patient' ? '不着急' : '一般'),
@@ -1924,11 +1909,13 @@ function buildReportPrompt(asset, ctx = {}) {
     '1. 三个板块都必须"结论在前、解释在后"：headline 是一句可直接读的结论，body 解释依据。',
     '1.1 market.headline 直接写价格区间，例如"市场价 ¥630–¥834"；不要在 headline 里写"影响判断"这类评价。',
     '1.2 样本偏少时，把"样本量偏少，需谨慎参考"写进 body 最后一句或 risks，不要塞进 headline。',
-    '2. market 讲价格区间与样本量；pricing 讲为什么推荐这个挂牌价、议价空间，并体现用户的着急程度；holding 讲持有成本与是否该继续持有。',
+    '2. market 讲价格区间与样本量；pricing 讲为什么推荐这个挂牌价、议价空间；holding 讲持有成本与是否该继续持有。',
+    '2.1 着急程度与价格方向必须一致：着急出手 → 价格偏低、议价空间小；不着急 → 价格偏高、议价空间大。禁止写出相反的说法。',
     '3. body 里至少引用两个具体数字（样本量、置信区间、分位价、折扣率任选）。',
     '4. listings 必须两版：simple 是 30-60 字的简约版；detailed 是 120-200 字的闲鱼风格，包含成色、使用情况、配件、交易方式，让买家信任。',
     '5. 不得写价格，不得写"全新""无瑕疵"等未确认表述。',
-    '6. 只能使用上面出现过的数字。'
+    '6. 只能使用上面出现过的数字。',
+    '7. 挂牌价只依据二手市场样本（分位价、样本量、折扣），不要用购入价或折旧估值推算价格。'
   ].join('\n');
 }
 
@@ -2389,6 +2376,7 @@ function assetDetailPanel() {
       + '<div><small>价格区间</small><strong>¥' + d.price.distribution.p25 + '–¥' + d.price.distribution.p75 + '</strong></div>'
       + '<div><small>样本量</small><strong>' + d.price.basis.count + ' 条</strong></div>' : '')
     + '</div>'
+    + '<p class="panel-note">定价口径：' + (d.form.urgency === 'fast' ? '着急出手 → 取较低价位（P25 附近），议价空间小' : d.form.urgency === 'patient' ? '不着急 → 取较高价位（P75 附近），议价空间大' : '一般 → 取中间价位（P50 附近）') + '</p>'
     + reportSectionMarkup('市场行情', rep.market, lowConfidence ? '样本量偏少，需谨慎参考' : '')
     + reportSectionMarkup('挂牌价建议', rep.pricing)
     + reportSectionMarkup('持有成本', rep.holding)
@@ -2429,8 +2417,7 @@ async function generateAssetAll() {
       warranty: d.form.warranty,
       fullBox: d.form.fullBox,
       functional: d.form.functional,
-      urgency: d.form.urgency,
-      priorYuan: Math.round(valuation(a) / 100)
+      urgency: d.form.urgency
     });
     if (!price.ok) throw Error(price.reason || '没有可用的市场样本');
     const hold = holdingStats(a, price.distribution.p50);

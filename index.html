@@ -104,6 +104,33 @@
 .ai-headline{margin:10px 0 0;font-size:14px;font-weight:600;color:var(--ink);background:#f3f6ee;border-left:3px solid var(--green);padding:8px 10px;border-radius:6px}
 .ai-report{margin:0;font-size:13px;line-height:1.9;color:var(--ink);white-space:pre-wrap}
 
+/* ---- 物品页 v2 ---- */
+.assets-section{margin-top:6px}
+.asset-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:16px}
+.asset-actions .button{width:100%;justify-content:center;font-size:12px;padding:9px 10px}
+.asset-range{font-size:16px!important}
+.range-loading,.range-error,.range-empty{font-size:12px;color:#99a18c;font-weight:400}
+.range-error{color:#b07a5b}
+.field-hint{display:block;font-size:11px;color:#99a18c;margin-top:6px}
+
+/* ---- 子页：挂牌建议 ---- */
+.detail-body{display:grid;gap:18px}
+.detail-form{background:#f3f6ee;border-radius:14px;padding:16px}
+.detail-flags{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:#5f6b53;margin:4px 0 14px}
+.detail-flags label{display:inline-flex;align-items:center;gap:6px}
+.detail-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+.detail-metrics>div{background:#fbfcf8;border:1px solid var(--line);border-radius:12px;padding:12px}
+.detail-metrics small{display:block;font-size:10px;color:#99a18c;margin-bottom:4px}
+.detail-metrics strong{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}
+.report-block{background:#fbfcf8;border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:12px}
+.report-block h3{font-size:12px;color:#8d997d;margin:0 0 10px;font-weight:500;letter-spacing:.04em}
+.report-headline{font-size:15px;font-weight:600;color:var(--ink);margin:0 0 8px;background:#f3f6ee;border-left:3px solid var(--green);padding:8px 10px;border-radius:6px}
+.report-body{font-size:13px;line-height:1.9;color:#3f4a37;margin:0;white-space:pre-wrap}
+.listing-card{border:1px dashed var(--line);border-radius:12px;padding:14px;margin-top:10px;background:#fff}
+.listing-card-head{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#8d997d;margin-bottom:8px}
+.modal-header{position:sticky;top:0;z-index:6;background:#fafbf7;padding-bottom:12px;margin:-28px -28px 20px;padding:22px 28px 12px;border-bottom:1px solid var(--line)}
+@media (max-width:640px){.asset-actions{grid-template-columns:1fr}.detail-metrics{grid-template-columns:1fr}}
+
 </style>
 </head>
 <body>
@@ -1091,6 +1118,14 @@ function conditionBucket(code) {
   return '';
 }
 
+/** 从 serviceLabelsInfo 解析价位段，例如 "500-1000元耳机" → {low:500, high:1000} */
+function priceBand(label) {
+  const m = /(\d+)\s*-\s*(\d+)\s*元/.exec(String(label || ''));
+  if (!m) return null;
+  const low = Number(m[1]), high = Number(m[2]);
+  return low > 0 && high > low ? {low, high} : null;
+}
+
 /** 从标题里抽特征：维修机、无配件、容量、国行 */
 function titleFlags(title) {
   const t = String(title || '');
@@ -1117,6 +1152,7 @@ function normalizeListings(items) {
         condition,
         bucket: conditionBucket(condition),
         flags: titleFlags(title),
+        band: priceBand((Array.isArray(it.serviceLabelsInfo) ? it.serviceLabelsInfo.join(' ') : '')),
         url: String((it && it.jumpUrl) || '')
       };
     })
@@ -1126,12 +1162,12 @@ function normalizeListings(items) {
 /** 分位数：把价格从小到大排队，看分布，避免极端值误导 */
 function priceStats(prices) {
   const list = (prices || []).filter(n => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
-  if (!list.length) return {count: 0, min: null, p25: null, median: null, p75: null, max: null};
+  if (!list.length) return {count: 0, min: null, p10: null, p25: null, median: null, p75: null, p90: null, max: null};
   const at = p => list[Math.min(list.length - 1, Math.max(0, Math.round((list.length - 1) * p)))];
   const mid = list.length % 2 === 1
     ? list[(list.length - 1) / 2]
     : Math.round((list[list.length / 2 - 1] + list[list.length / 2]) / 2);
-  return {count: list.length, min: list[0], p25: at(0.25), median: mid, p75: at(0.75), max: list[list.length - 1]};
+  return {count: list.length, min: list[0], p10: at(0.1), p25: at(0.25), median: mid, p75: at(0.75), p90: at(0.9), max: list[list.length - 1]};
 }
 
 /** 加权中位数：同成色权重 1，相邻档 0.6，其他 0.3 */
@@ -1191,10 +1227,12 @@ function buildSnapshot(input) {
     byCondition[b] = (byCondition[b] || 0) + 1;
   }
 
+  const stage1 = pool;
+
   const target = String(targetCondition || '');
-  const same = target ? pool.filter(x => x.bucket === target) : [];
+  const same = target ? stage1.filter(x => x.bucket === target) : [];
   const usedSubset = same.length >= 8;
-  const basis = usedSubset ? same : pool;
+  const basis = usedSubset ? same : stage1;
 
   const weights = basis.map(x => {
     if (!target || !x.bucket) return 1;
@@ -1669,6 +1707,331 @@ function normalizeAdviceText(payload, allowed = []) {
   };
 }
 
+
+/** 特征调整：保修、配件、功能 */
+function featureAdjust(flags = {}) {
+  let m = 1;
+  if (flags.warranty) m += 0.02;
+  if (flags.fullBox) m += 0.03;
+  if (flags.functional === false) m -= 0.15;
+  return Math.round(m * 100) / 100;
+}
+
+/** 使用年限对"可比样本"的提示：太老/太新时提醒样本未必可比 */
+function ageNote(ageMonths, median) {
+  const notes = [];
+  if (Number.isFinite(ageMonths)) {
+    if (ageMonths < 3) notes.push('使用不足 3 个月，二手价通常接近原价的 7-8 折');
+    if (ageMonths > 60) notes.push('已使用超过 5 年，买家会重点看成色与电池');
+  }
+  if (!Number.isFinite(median)) notes.push('缺少市场价，无法给出分布');
+  return notes;
+}
+
+/** 分位分布：从样本价格算出五档 */
+function distribution(prices) {
+  const list = (prices || []).filter(n => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+  if (!list.length) return null;
+  const at = p => list[Math.min(list.length - 1, Math.max(0, Math.round((list.length - 1) * p)))];
+  return {p10: at(0.1), p25: at(0.25), p50: at(0.5), p75: at(0.75), p90: at(0.9)};
+}
+
+/** 置信度：样本量与区间宽度共同决定 */
+function confidenceOf(count, ciLow, ciHigh, median) {
+  const n = Number(count) || 0;
+  const width = (Number.isFinite(ciLow) && Number.isFinite(ciHigh) && median) ? (ciHigh - ciLow) / median : null;
+  let score = 0;
+  if (n >= 20) score += 2; else if (n >= 10) score += 1;
+  if (width != null && width <= 0.08) score += 2; else if (width != null && width <= 0.15) score += 1;
+  if (score >= 3) return {level: 'high', label: '证据较充分', score};
+  if (score >= 2) return {level: 'medium', label: '证据一般', score};
+  return {level: 'low', label: '样本偏少，仅供参考', score};
+}
+
+/**
+ * 特征匹配定价：
+ * 1) 用同成色样本作为可比对象
+ * 2) 按成色/保修/配件/功能做乘法调整
+ * 3) 输出五档分布 + 按紧急程度推荐挂牌价
+ */
+function estimatePrice(snapshot, features = {}) {
+  const snap = snapshot || {};
+  const st = (snap.listings && snap.listings.stats) || {};
+  const sub = snap.subset || {};
+  const cal = snap.calibration || {};
+  const prices = (snap.listings && snap.listings.sample) ? [] : [];
+  const dist = (snap.listings && snap.listings.distribution) || null;
+  const median = Number.isFinite(st.median) ? st.median : null;
+
+  if (median == null) return {ok: false, reason: '没有可用的市场样本', notes: []};
+
+  const baseFactor = sub.used ? 1 : conditionFactor(features.condition || '95');
+  const adjust = featureAdjust(features);
+  const delta = Number.isFinite(cal.delta) ? cal.delta : 1;
+
+  const scaled = (v) => Math.round(v * baseFactor * adjust * delta);
+  const d = dist || {p10: st.p10, p25: st.p25, p50: st.median, p75: st.p75, p90: st.p90};
+  const out = {
+    ok: true,
+    base: median,
+    factor: baseFactor,
+    adjust,
+    calibration: delta,
+    distribution: {
+      p10: scaled(d.p10 != null ? d.p10 : st.p25),
+      p25: scaled(d.p25 != null ? d.p25 : st.p25),
+      p50: scaled(d.p50 != null ? d.p50 : st.median),
+      p75: scaled(d.p75 != null ? d.p75 : st.p75),
+      p90: scaled(d.p90 != null ? d.p90 : st.p75)
+    },
+    basis: {
+      rawCount: (snap.listings && snap.listings.rawCount) || 0,
+      count: (snap.listings && snap.listings.count) || 0,
+      removed: (snap.listings && snap.listings.removed) || 0,
+      subsetUsed: !!sub.used,
+      subsetCount: sub.count || 0,
+      condition: conditionLabel(features.condition || '95')
+    },
+    notes: ageNote(features.ageMonths, median)
+  };
+
+  // 年限先验：用折旧估值当 prior，按样本量做加权（样本越少越信先验）
+  const priorYuan = Number.isFinite(features.priorYuan) && features.priorYuan > 0 ? features.priorYuan : null;
+  const n = out.basis.count || 0;
+  const weight = priorYuan == null ? 1 : Math.min(0.9, n / (n + 8));
+  if (priorYuan != null) {
+    const rawP50 = out.distribution.p50;
+    const blended = Math.round(rawP50 * weight + priorYuan * (1 - weight));
+    const ratio = rawP50 > 0 ? blended / rawP50 : 1;
+    out.distribution = {
+      p10: Math.round(out.distribution.p10 * ratio),
+      p25: Math.round(out.distribution.p25 * ratio),
+      p50: blended,
+      p75: Math.round(out.distribution.p75 * ratio),
+      p90: Math.round(out.distribution.p90 * ratio)
+    };
+    out.prior = priorYuan;
+    out.weight = Math.round(weight * 100) / 100;
+    out.notes.push('已用折旧估值 ¥' + priorYuan + ' 做先验，样本权重 ' + Math.round(weight * 100) + '%');
+  }
+
+  const urgency = ['fast', 'normal', 'patient'].includes(features.urgency) ? features.urgency : 'normal';
+  const pick = urgency === 'fast' ? out.distribution.p25 : urgency === 'patient' ? out.distribution.p75 : out.distribution.p50;
+  const buffer = urgency === 'fast' ? 0.03 : urgency === 'patient' ? 0.12 : 0.07;
+  out.urgency = urgency;
+  out.recommended = Math.round(pick * (1 + buffer));
+  out.buffer = buffer;
+  out.confidence = confidenceOf(out.basis.count, st.ciLow, st.ciHigh, median);
+  out.ci = {
+    low: Number.isFinite(st.ciLow) ? scaled(st.ciLow) : null,
+    high: Number.isFinite(st.ciHigh) ? scaled(st.ciHigh) : null
+  };
+  return out;
+}
+
+/** 给表单用的成色选项 */
+function conditionOptions() {
+  return CONDITIONS.map(c => ({id: c.id, label: c.label}));
+}
+
+
+/** 允许出现的数字，用于事后校验 */
+function reportAllowedNumbers(price, hold, snap) {
+  const out = new Set();
+  const add = (v) => { if (Number.isFinite(v)) out.add(Math.round(v)); };
+  const p = price || {};
+  const d = p.distribution || {};
+  add(d.p10); add(d.p25); add(d.p50); add(d.p75); add(d.p90);
+  add(p.recommended); add(p.base);
+  if (Number.isFinite(p.buffer)) add(p.buffer * 100);
+  if (Number.isFinite(p.calibration)) add(p.calibration * 100);
+  if (p.ci) { add(p.ci.low); add(p.ci.high); }
+  const h = hold || {};
+  if (h.current != null) add(h.current / 100);
+  if (h.daily != null) add(h.daily / 100);
+  if (h.ratio != null) add(h.ratio * 100);
+  add(h.days);
+  if (h.burn30 != null) add(h.burn30 / 100);
+  const st = (snap && snap.listings && snap.listings.stats) || {};
+  add(st.ciLow); add(st.ciHigh); add(st.median);
+  const listing = (snap && snap.listings) || {};
+  add(listing.rawCount); add(listing.count); add(listing.removed);
+  const sub = (snap && snap.subset) || {};
+  add(sub.count);
+  const deal = (snap && snap.deal) || {};
+  add(deal.min); add(deal.max);
+  // 分位标签（P10/P25/...）与“95% 置信区间”里的数字本身不是价格，允许出现
+  for (const n of [10, 25, 50, 75, 90, 95]) add(n);
+  const extra = (snap && snap.extraNumbers) || {};
+  for (const k of Object.keys(extra)) add(extra[k]);
+  return [...out];
+}
+
+function buildReportPrompt(asset, ctx = {}) {
+  const price = ctx.price || {};
+  const d = price.distribution || {};
+  const hold = ctx.hold || {};
+  const f = ctx.features || {};
+  const snap = ctx.snapshot || {};
+  const st = (snap.listings && snap.listings.stats) || {};
+  const sub = snap.subset || {};
+  const listingInfo = snap.listings || {};
+  const cal = snap.calibration || {};
+  const deal = snap.deal || {};
+  const yuan = (v) => (Number.isFinite(v) ? Math.round(v) : null);
+
+  return [
+    '你是二手交易分析师。请写一份结构化的估价报告，并使用给定数据，不得引入任何未提供的数字。',
+    '',
+    '商品：' + (asset.name || ''),
+    '成色：' + conditionLabel(f.condition || '95'),
+    '使用时长：' + (f.ageMonths != null ? f.ageMonths + ' 个月' : '未知'),
+    '是否在保：' + (f.warranty ? '是' : '否'),
+    '配件齐全：' + (f.fullBox ? '是' : '否'),
+    '功能健全：' + (f.functional === false ? '否（有功能问题）' : '是'),
+    '购入价：' + (yuan((asset.price || 0) / 100) != null ? yuan((asset.price || 0) / 100) : '未知') + ' 元',
+    '',
+    '样本与统计：',
+    '原始 ' + (listingInfo.rawCount || 0) + ' 条，剔除 ' + (listingInfo.removed || 0) + ' 条，进入统计 ' + (listingInfo.count || 0) + ' 条',
+    '同成色筛选：' + (sub.used ? ('已启用，' + (sub.count || 0) + ' 条') : '未启用'),
+    '价格分布 P10/P25/P50/P75/P90：' + [d.p10, d.p25, d.p50, d.p75, d.p90].map(v => (v == null ? '未知' : v)).join(' / '),
+    '95% 置信区间：' + (price.ci && price.ci.low != null ? price.ci.low + ' - ' + price.ci.high : '未知'),
+    '成交区间：' + (deal.min != null ? deal.min + ' - ' + deal.max : '未知'),
+    '挂牌到成交折扣：' + (cal.delta != null ? Math.round(cal.delta * 100) + '%' : '未获取'),
+    '置信程度：' + ((price.confidence && price.confidence.label) || '未知'),
+    '',
+    '推荐挂牌：' + (price.recommended != null ? price.recommended : '未知') + ' 元（预留 ' + (price.buffer != null ? Math.round(price.buffer * 100) : '未知') + '% 议价空间）',
+    '',
+    '持有情况：持有 ' + (hold.days != null ? hold.days : '未知') + ' 天，当前市值 ' + (yuan(hold.current != null ? hold.current / 100 : null) != null ? yuan(hold.current / 100) : '未知') + ' 元，保值率 ' + (hold.ratio != null ? Math.round(hold.ratio * 100) + '%' : '未知') + '，日均成本 ' + (hold.daily != null ? (hold.daily / 100).toFixed(2) : '未知') + ' 元',
+    '',
+    '输出 JSON，不要任何解释：',
+    '{"market":{"headline":"一句话结论","body":"2-3句解释"},"pricing":{"headline":"一句话结论","body":"2-4句解释"},"holding":{"headline":"一句话结论","body":"2-3句解释"},"action":"sell|wait|hold","risks":["..."],"listings":[{"style":"simple","title":"...","description":"...","tags":["..."]},{"style":"detailed","title":"...","description":"...","tags":["..."]}]}',
+    '',
+    '写作要求：',
+    '1. 三个板块都必须"结论在前、解释在后"：headline 是一句可直接读的结论，body 解释依据。',
+    '2. market 讲价格分布在什么水平、样本量多少、置信程度；pricing 讲为什么推荐这个挂牌价、议价空间；holding 讲持有成本与是否该继续持有。',
+    '3. body 里至少引用两个具体数字（样本量、置信区间、分位价、折扣率任选）。',
+    '4. listings 必须两版：simple 是 30-60 字的简约版；detailed 是 120-200 字的闲鱼风格，包含成色、使用情况、配件、交易方式，让买家信任。',
+    '5. 不得写价格，不得写"全新""无瑕疵"等未确认表述。',
+    '6. 只能使用上面出现过的数字。'
+  ].join('\n');
+}
+
+function buildReportMessages(asset, ctx = {}) {
+  return [
+    {role: 'system', content: buildReportPrompt(asset, ctx)},
+    {role: 'user', content: '请按规则输出 JSON。'}
+  ];
+}
+
+function reportNumbersIn(text) {
+  const out = [];
+  const re = /(?:[¥￥]\s*)?(\d+(?:\.\d+)?)/g;
+  let m;
+  while ((m = re.exec(String(text || ''))) !== null) {
+    const v = Number(m[1]);
+    if (Number.isFinite(v)) out.push(v);
+  }
+  return out;
+}
+
+function section(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const headline = String(src.headline || '').trim();
+  const body = String(src.body || '').trim();
+  if (!headline && !body) return null;
+  return {headline: headline.slice(0, 60), body: body.slice(0, 600)};
+}
+
+function listingOf(raw, style) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const title = String(src.title || '').trim();
+  const description = String(src.description || '').trim();
+  const tags = Array.isArray(src.tags) ? src.tags.map(t => String(t).trim()).filter(Boolean).slice(0, 5) : [];
+  if (!title || !description) return null;
+  return {style, title: title.slice(0, 30), description: description.slice(0, 260), tags};
+}
+
+function normalizeReport(payload, allowed = []) {
+  const src = payload && typeof payload === 'object' ? payload : {};
+  const market = section(src.market);
+  const pricing = section(src.pricing);
+  const holding = section(src.holding);
+  if (!market && !pricing && !holding) return {ok: false, reason: '模型没有给出报告'};
+
+  const list = Array.isArray(src.listings) ? src.listings : [];
+  const simple = listingOf(list.find(x => x && x.style === 'simple') || list[0], 'simple');
+  const detailed = listingOf(list.find(x => x && x.style === 'detailed') || list[1], 'detailed');
+
+  const set = allowed.map(Number).filter(Number.isFinite);
+  const stray = [];
+  const texts = [];
+  for (const s of [market, pricing, holding]) {
+    if (!s) continue;
+    texts.push(s.headline, s.body);
+  }
+  for (const text of texts) {
+    for (const n of reportNumbersIn(text)) {
+      if (!set.some(a => Math.abs(a - n) <= 1)) stray.push(n);
+    }
+  }
+
+  return {
+    ok: true,
+    market,
+    pricing,
+    holding,
+    action: ['sell', 'wait', 'hold'].includes(src.action) ? src.action : 'wait',
+    risks: Array.isArray(src.risks) ? src.risks.map(String).slice(0, 3) : [],
+    listings: [simple, detailed].filter(Boolean),
+    unverified: [...new Set(stray)].slice(0, 3)
+  };
+}
+
+/** 单独生成两版文案（简约 / 闲鱼详细版） */
+function buildTwoListingsPrompt(asset, ctx = {}) {
+  const f = ctx.features || {};
+  const price = ctx.price || {};
+  return [
+    '你是二手交易文案撰写者。请根据给定事实写两版转转/闲鱼风格的商品信息，不要编造未提供的功能、状态或瑕疵。',
+    '',
+    '商品：' + (asset.name || ''),
+    '成色：' + conditionLabel(f.condition || '95'),
+    '使用时长：' + (f.ageMonths != null ? f.ageMonths + ' 个月' : '未知'),
+    '是否在保：' + (f.warranty ? '是' : '否'),
+    '配件齐全：' + (f.fullBox ? '是' : '否'),
+    '功能健全：' + (f.functional === false ? '否（有功能问题）' : '是'),
+    '备注：' + (asset.note || '无'),
+    '参考价：' + (price.recommended != null ? price.recommended : '未知') + ' 元（不要写进文案）',
+    '',
+    '输出 JSON，不要任何解释：',
+    '{"listings":[{"style":"simple","title":"30字内","description":"30-60字","tags":["..."]},{"style":"detailed","title":"30字内","description":"120-200字","tags":["..."]}]}',
+    '',
+    '要求：',
+    '1. simple：一句话讲清型号、成色、卖点，适合快速挂单。',
+    '2. detailed：闲鱼风格，包含成色、使用情况、配件、交易方式，语气可信、不夸张，让买家放心。',
+    '3. 两版都不写价格，不写“全新”“无瑕疵”。',
+    '4. tags 各 3-5 个。'
+  ].join('\n');
+}
+
+function buildTwoListingsMessages(asset, ctx = {}) {
+  return [
+    {role: 'system', content: buildTwoListingsPrompt(asset, ctx)},
+    {role: 'user', content: '请按规则输出 JSON。'}
+  ];
+}
+
+function normalizeTwoListings(payload) {
+  const src = payload && typeof payload === 'object' ? payload : {};
+  const list = Array.isArray(src.listings) ? src.listings : [];
+  const simple = listingOf(list.find(x => x && x.style === 'simple') || list[0], 'simple');
+  const detailed = listingOf(list.find(x => x && x.style === 'detailed') || list[1], 'detailed');
+  const out = [simple, detailed].filter(Boolean);
+  if (!out.length) return {ok: false, reason: '模型没有给出文案'};
+  return {ok: true, listings: out};
+}
+
 /**
  * 云服务配置。publishableKey 是「可公开」的密钥，用于标识应用；
  * 真正的鉴权由手机号验证码 + 行级安全（RLS）完成。
@@ -1802,6 +2165,322 @@ async function pullState(cloud) {
 }
 
 
+/* 「我的物品」页面 v2：总览 + 物品模块 + 挂牌建议子页 */
+
+let assetRanges = {};
+let rangeInflight = 0;
+let assetDetail = null;
+
+function monthsSince(dateStr) {
+  const d = new Date(String(dateStr || '') + 'T00:00:00');
+  if (Number.isNaN(d.getTime())) return null;
+  const days = (Date.now() - d.getTime()) / 86400000;
+  return Math.max(0, Math.round(days / 30.4));
+}
+
+function rangeCell(a) {
+  const r = assetRanges[a.id] || {};
+  if (r.status === 'loading') return '<span class="range-loading">查询中…</span>';
+  if (r.status === 'error') return '<span class="range-error">暂不可用</span>';
+  if (r.status === 'ok' && r.data && r.data.min != null && r.data.max != null) {
+    return '¥' + r.data.min + '–¥' + r.data.max;
+  }
+  return '<span class="range-empty">—</span>';
+}
+
+function fetchAssetRange(asset) {
+  const url = apiBase()
+    + '/api/zz/market?keyword=' + encodeURIComponent(asset.name)
+    + '&condition=95&lite=1';
+  return fetch(url)
+    .then(r => r.json())
+    .then(body => {
+      if (!body.ok) throw Error(body.error || '行情失败');
+      const d = body.data || {};
+      const deal = d.deal || {};
+      const st = (d.listings && d.listings.stats) || {};
+      const min = deal.min != null ? deal.min : st.p25;
+      const max = deal.max != null ? deal.max : st.p75;
+      if (min == null || max == null) throw Error('暂无行情');
+      return {min, max, median: st.median, count: (d.listings && d.listings.count) || 0, snapshot: d};
+    });
+}
+
+function refreshAssetGrid() {
+  const grid = $('#asset-grid');
+  if (grid) grid.innerHTML = assetCardsV2();
+}
+
+function ensureAssetRanges() {
+  const list = filteredAssets();
+  for (const a of list) {
+    const cur = assetRanges[a.id];
+    if (cur && (cur.status === 'ok' || cur.status === 'loading')) continue;
+    if (cur && cur.status === 'error' && Date.now() - (cur.at || 0) < 60000) continue;
+    if (rangeInflight >= 3) break;
+    assetRanges[a.id] = {status: 'loading'};
+    rangeInflight++;
+    fetchAssetRange(a)
+      .then(data => { assetRanges[a.id] = {status: 'ok', data}; })
+      .catch(() => { assetRanges[a.id] = {status: 'error', at: Date.now()}; })
+      .finally(() => {
+        rangeInflight--;
+        refreshAssetGrid();
+        ensureAssetRanges();
+      });
+  }
+}
+
+function assetCardsV2() {
+  const rows = filteredAssets();
+  if (!rows.length) {
+    return '<div class="panel empty" style="grid-column:1/-1">' + icon('box', 32)
+      + '这里还没有物品。把值得照顾的东西记下来吧。<br>'
+      + '<button class="text-button" data-action="add-asset">＋ 添加物品</button></div>';
+  }
+  return rows.map(a => {
+    const val = valuation(a);
+    const pct = a.price ? Math.max(0, Math.min(100, val / a.price * 100)) : 0;
+    return '<article class="asset-card">'
+      + '<div class="asset-visual ' + a.emoji + '"><span class="asset-status">' + esc(a.status) + '</span>' + icon(a.emoji, 80) + '</div>'
+      + '<div class="asset-card-body">'
+      + '<h3>' + esc(a.name) + '</h3>'
+      + '<span class="asset-date">购于 ' + dateLabel(a.date) + '</span>'
+      + '<div class="asset-values">'
+      + '<div><small>折旧估值</small><strong>¥ ' + money(val, 0) + '</strong></div>'
+      + '<div style="text-align:right"><small>二手行情</small><strong class="asset-range">' + rangeCell(a) + '</strong></div>'
+      + '</div>'
+      + '<div class="progress"><span style="width:' + pct + '%"></span></div>'
+      + '<div class="asset-actions">'
+      + '<button class="button ghost" data-action="edit-asset" data-id="' + esc(a.id) + '">管理物品</button>'
+      + '<button class="button" data-action="asset-detail" data-id="' + esc(a.id) + '">挂牌价建议</button>'
+      + '<button class="button primary" data-action="asset-detail" data-id="' + esc(a.id) + '" data-tab="listing">转卖文案</button>'
+      + '</div>'
+      + '</div></article>';
+  }).join('');
+}
+
+function assetsPageV2() {
+  return heading('拥有的，也值得照顾。', '从买下的那一天，到下一次转手，陪你管理物品的每一程。',
+      '<button class="button" data-action="add-asset">' + icon('plus', 15) + ' 添加物品</button>')
+    + '<div class="stat-grid">'
+    + stat('当前物品估值', '¥ ' + money(state.assets.reduce((s, a) => s + valuation(a), 0), 0), '按折旧计算，非二手平台报价', 'box')
+    + stat('闲置物品', state.assets.filter(a => a.status === '闲置').length + ' <span style="font-size:13px">件</span>', '用不到的，也许值得一个新去处。', 'leaf')
+    + stat('到期提醒', reminderItems().length + ' <span style="font-size:13px">项</span>', '未来30天内的退货与保修', 'clock')
+    + '</div>'
+    + (reminderItems().length ? '<section style="margin-bottom:23px">' + renderReminders(2) + '</section>' : '')
+    + '<section class="assets-section">'
+    + '<div class="toolbar"><label class="search">' + icon('search', 16)
+    + '<input id="asset-search" value="' + esc(assetSearch) + '" placeholder="搜索我的物品" aria-label="搜索物品"></label>'
+    + '<select id="asset-status" aria-label="筛选物品状态"><option value="">全部状态</option>'
+    + ['使用中', '待退货', '闲置', '已售出', '已回收'].map(s => '<option ' + (assetStatus === s ? 'selected' : '') + '>' + s + '</option>').join('')
+    + '</select><button class="text-button" data-action="depreciation">' + icon('info', 14) + ' 估值怎么算</button></div>'
+    + '<div class="asset-grid" id="asset-grid">' + assetCardsV2() + '</div>'
+    + '<div class="notice" style="margin-top:20px">' + icon('leaf', 16)
+    + '<span>二手行情来自转转在售样本，进入本页时自动刷新一次；折旧估值与平台报价口径不同，不能直接比较。</span></div>'
+    + '</section>';
+}
+
+/* ---------- 子页：挂牌价建议 ---------- */
+
+function openAssetDetail(id, tab) {
+  const a = state.assets.find(x => x.id === id);
+  if (!a) return;
+  const warranty = !!(a.warrantyDate && a.warrantyDate >= today());
+  assetDetail = {
+    id,
+    tab: tab || 'report',
+    form: {ageMonths: monthsSince(a.date), condition: '95', warranty, fullBox: false, functional: true, urgency: 'normal'},
+    snapshot: null,
+    price: null,
+    hold: null,
+    report: null,
+    loading: false,
+    error: '',
+    listings: null,
+    listingLoading: false,
+    listingError: ''
+  };
+  openModal('挂牌价建议 · ' + esc(a.name), '先填写物品实际情况，再生成报告与文案', assetDetailMarkup(), true);
+  if (tab === 'listing') setTimeout(() => $('#asset-detail-panel')?.scrollIntoView({behavior: 'smooth', block: 'start'}), 60);
+}
+
+function assetDetailMarkup() {
+  const d = assetDetail;
+  if (!d) return '';
+  const f = d.form;
+  return '<div class="detail-body">'
+    + '<section class="detail-form">'
+    + '<div class="form-grid">'
+    + '<label class="field">使用时长（月）<input type="number" min="0" max="240" value="' + (f.ageMonths != null ? f.ageMonths : '') + '" data-detail-field="ageMonths"></label>'
+    + '<label class="field">成色<select data-detail-field="condition">'
+    + CONDITIONS.map(c => '<option value="' + c.id + '"' + (f.condition === c.id ? ' selected' : '') + '>' + c.label + '</option>').join('')
+    + '</select></label>'
+    + '</div>'
+    + '<div class="detail-flags">'
+    + '<label><input type="checkbox" data-detail-flag="warranty"' + (f.warranty ? ' checked' : '') + '> 仍在保修期</label>'
+    + '<label><input type="checkbox" data-detail-flag="fullBox"' + (f.fullBox ? ' checked' : '') + '> 配件齐全</label>'
+    + '<label><input type="checkbox" data-detail-flag="functional"' + (f.functional ? ' checked' : '') + '> 功能健全</label>'
+    + '</div>'
+    + '<div class="form-actions">'
+    + '<button class="button primary" data-action="asset-report">' + (d.loading ? '生成中…' : '生成转卖建议') + '</button>'
+    + '<button class="button" data-action="asset-listings">' + (d.listingLoading ? '生成中…' : '生成转卖文案') + '</button>'
+    + '</div>'
+    + '</section>'
+    + '<div id="asset-detail-panel">' + assetDetailPanel() + '</div>'
+    + '</div>';
+}
+
+function reportSectionMarkup(title, sec) {
+  if (!sec) return '';
+  return '<section class="report-block"><h3>' + title + '</h3>'
+    + '<p class="report-headline">' + esc(sec.headline) + '</p>'
+    + '<p class="report-body">' + esc(sec.body) + '</p></section>';
+}
+
+function listingCardMarkup(item) {
+  if (!item) return '';
+  const style = item.style === 'detailed' ? '闲鱼详细版' : '简约版';
+  return '<div class="listing-card"><div class="listing-card-head"><span>' + style + '</span>'
+    + '<button class="text-button" data-action="asset-copy" data-style="' + esc(item.style) + '">复制</button></div>'
+    + '<p class="listing-title">' + esc(item.title) + '</p>'
+    + '<p class="listing-desc">' + esc(item.description) + '</p>'
+    + '<div class="listing-tags">' + item.tags.map(t => '<span>' + esc(t) + '</span>').join('') + '</div></div>';
+}
+
+function assetDetailPanel() {
+  const d = assetDetail;
+  if (!d) return '';
+  if (d.loading) return '<p class="ai-note loading"><span class="spinner"></span>AI 正在写估价报告…</p>';
+  if (d.error) return '<div class="notice amber">' + icon('info', 15) + esc(d.error) + '</div>';
+  if (!d.report) {
+    return '<p class="panel-note">填写上方信息后点「生成转卖建议」，会基于同成色样本给出市场行情、挂牌价建议与持有成本。</p>';
+  }
+  const rep = d.report;
+  const actionText = rep.action === 'sell' ? '建议出手' : rep.action === 'hold' ? '继续持有' : '再等等';
+  return '<div class="detail-metrics">'
+    + (d.price ? '<div><small>推荐挂牌</small><strong>¥' + d.price.recommended + '</strong></div>'
+      + '<div><small>价格区间</small><strong>¥' + d.price.distribution.p25 + '–¥' + d.price.distribution.p75 + '</strong></div>'
+      + '<div><small>置信程度</small><strong>' + esc(d.price.confidence.label) + '</strong></div>' : '')
+    + '</div>'
+    + reportSectionMarkup('市场行情', rep.market)
+    + reportSectionMarkup('挂牌价建议', rep.pricing)
+    + reportSectionMarkup('持有成本', rep.holding)
+    + '<p class="panel-note">AI 判断：' + actionText + (rep.risks.length ? ' · ' + esc(rep.risks.join('；')) : '') + '</p>'
+    + (rep.unverified.length ? '<div class="notice amber">文中出现了参考数据之外的数字（' + rep.unverified.join('、') + '），请以上方指标为准。</div>' : '')
+    + (d.listings && d.listings.length
+      ? '<section class="report-block"><h3>转卖文案</h3>' + d.listings.map(listingCardMarkup).join('') + '</section>'
+      : '')
+    + (d.listingLoading ? '<p class="ai-note loading"><span class="spinner"></span>AI 正在写文案…</p>' : '')
+    + (d.listingError ? '<div class="notice amber">' + esc(d.listingError) + '</div>' : '');
+}
+
+function renderAssetDetail() {
+  const panel = $('#asset-detail-panel');
+  if (panel) panel.innerHTML = assetDetailPanel();
+  const btn = document.querySelector('[data-action="asset-report"]');
+  if (btn) btn.textContent = assetDetail && assetDetail.loading ? '生成中…' : '生成转卖建议';
+  const btn2 = document.querySelector('[data-action="asset-listings"]');
+  if (btn2) btn2.textContent = assetDetail && assetDetail.listingLoading ? '生成中…' : '生成转卖文案';
+}
+
+function detailSnapshot(a, condition) {
+  const cached = assetRanges[a.id];
+  if (cached && cached.status === 'ok' && cached.data && cached.data.snapshot) {
+    return Promise.resolve(cached.data.snapshot);
+  }
+  return fetchAssetRange(a).then(r => r.snapshot);
+}
+
+async function generateAssetReport() {
+  const d = assetDetail;
+  if (!d) return;
+  const a = state.assets.find(x => x.id === d.id);
+  if (!a) return;
+  if (!visionReady(visionCfg)) { toast('需要先配置 AI（设置 → AI 识图）'); return; }
+  d.loading = true;
+  d.error = '';
+  renderAssetDetail();
+  try {
+    const snap = await detailSnapshot(a, d.form.condition);
+    const price = estimatePrice(snap, {
+      condition: d.form.condition,
+      ageMonths: Number(d.form.ageMonths) || 0,
+      warranty: d.form.warranty,
+      fullBox: d.form.fullBox,
+      functional: d.form.functional,
+      urgency: d.form.urgency,
+      priorYuan: Math.round(valuation(a) / 100)
+    });
+    if (!price.ok) throw Error(price.reason || '没有可用的市场样本');
+    const hold = holdingStats(a, price.distribution.p50);
+    const payload = await callChat(buildReportMessages(a, {features: d.form, price, snapshot: snap, hold, condition: d.form.condition}), visionTuning(visionCfg));
+    const rep = normalizeReport(payload, reportAllowedNumbers(price, hold, snap));
+    if (!rep.ok) throw Error(rep.reason || '报告生成失败');
+    d.snapshot = snap;
+    d.price = price;
+    d.hold = hold;
+    d.report = rep;
+    if (rep.listings && rep.listings.length) d.listings = rep.listings;
+  } catch (err) {
+    d.error = err && err.message ? err.message : '报告生成失败';
+  } finally {
+    d.loading = false;
+    renderAssetDetail();
+  }
+}
+
+async function generateAssetListings() {
+  const d = assetDetail;
+  if (!d) return;
+  const a = state.assets.find(x => x.id === d.id);
+  if (!a) return;
+  if (!visionReady(visionCfg)) { toast('需要先配置 AI（设置 → AI 识图）'); return; }
+  d.listingLoading = true;
+  d.listingError = '';
+  renderAssetDetail();
+  try {
+    const snap = d.snapshot || await detailSnapshot(a, d.form.condition);
+    const price = d.price || estimatePrice(snap, {condition: d.form.condition, ageMonths: Number(d.form.ageMonths) || 0, priorYuan: Math.round(valuation(a) / 100)});
+    const payload = await callChat(buildTwoListingsMessages(a, {features: d.form, price}), visionTuning(visionCfg));
+    const res = normalizeTwoListings(payload);
+    if (!res.ok) throw Error(res.reason || '文案生成失败');
+    d.listings = res.listings;
+  } catch (err) {
+    d.listingError = err && err.message ? err.message : '文案生成失败';
+  } finally {
+    d.listingLoading = false;
+    renderAssetDetail();
+  }
+}
+
+function copyAssetListing(style) {
+  const d = assetDetail;
+  if (!d || !d.listings) return;
+  const item = d.listings.find(x => x.style === style) || d.listings[0];
+  if (!item) return;
+  const text = item.title + '\n' + item.description + '\n' + item.tags.map(t => '#' + t).join(' ');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast('文案已复制'), () => toast('复制失败，请手动选择'));
+  } else {
+    toast('当前环境不支持自动复制');
+  }
+}
+
+document.addEventListener('change', e => {
+  if (!assetDetail) return;
+  const f = e.target.closest('[data-detail-field]');
+  if (f) { assetDetail.form[f.dataset.detailField] = f.type === 'number' ? Number(f.value) : f.value; return; }
+  const c = e.target.closest('[data-detail-flag]');
+  if (c) { assetDetail.form[c.dataset.detailFlag] = c.checked; return; }
+});
+
+document.addEventListener('input', e => {
+  if (!assetDetail) return;
+  const f = e.target.closest('[data-detail-field]');
+  if (f && f.type === 'number') assetDetail.form[f.dataset.detailField] = Number(f.value);
+});
+
 const KEY='laicai.local.v1';
 const $=(s)=>document.querySelector(s);
 const esc=(v='')=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1821,7 +2500,7 @@ function reminderItems(){return state.assets.filter(a=>!['已售出','已回收'
 function heading(title,desc,actions=''){return `<div class="page-head"><div><div class="eyebrow">YOUR MONEY, YOUR LIFE</div><h1>${title}</h1><p>${desc}</p></div><div class="head-actions">${actions}<button class="button primary" data-action="add-tx">${icon('plus',16)} 记一笔</button></div></div>`;}
 function monthPicker(){return `<div class="month-picker"><button data-action="month-prev" aria-label="上个月">${icon('left',14)}</button>${month.replace('-',' 年 ')} 月<button data-action="month-next" aria-label="下个月">${icon('right',14)}</button></div>`;}
 function stat(label,value,caption,ic){return `<article class="stat-card"><div><div class="stat-label">${label}</div><div class="stat-value">${value}</div><div class="stat-caption">${caption}</div></div><span class="stat-icon">${icon(ic,18)}</span></article>`;}
-function render(){page=navs.some(n=>n[0]===location.hash.slice(1))?location.hash.slice(1):'home';$('#nav').innerHTML=navs.map(([id,label,ic])=>`<a href="#${id}" class="${page===id?'active':''}" ${page===id?'aria-current="page"':''}>${icon(ic,19)}<span>${label}</span></a>`).join('');$('#breadcrumb').textContent=navs.find(n=>n[0]===page)[1];$('#bell').innerHTML=icon('bell',19)+(reminderItems().length?'<i class="notification-dot"></i>':'');$('#main').innerHTML=({home:homePage,ledger:ledgerPage,assets:assetsPage,market:marketPage,settings:settingsPage}[page])();renderUserUI();if(page==='market')ensureMarketData();checkDueNotifs();if(!storageOK)$('#main').insertAdjacentHTML('afterbegin','<div class="notice amber">浏览器存储不可用，当前修改仅在本次会话有效，请及时导出备份。</div>');}
+function render(){page=navs.some(n=>n[0]===location.hash.slice(1))?location.hash.slice(1):'home';$('#nav').innerHTML=navs.map(([id,label,ic])=>`<a href="#${id}" class="${page===id?'active':''}" ${page===id?'aria-current="page"':''}>${icon(ic,19)}<span>${label}</span></a>`).join('');$('#breadcrumb').textContent=navs.find(n=>n[0]===page)[1];$('#bell').innerHTML=icon('bell',19)+(reminderItems().length?'<i class="notification-dot"></i>':'');$('#main').innerHTML=({home:homePage,ledger:ledgerPage,assets:assetsPage,market:marketPage,settings:settingsPage}[page])();renderUserUI();if(page==='market')ensureMarketData();if(page==='assets')ensureAssetRanges();checkDueNotifs();if(!storageOK)$('#main').insertAdjacentHTML('afterbegin','<div class="notice amber">浏览器存储不可用，当前修改仅在本次会话有效，请及时导出备份。</div>');}
 function plant(){return `<svg class="hero-art" viewBox="0 0 200 170" fill="none" aria-hidden="true"><ellipse cx="109" cy="152" rx="65" ry="9" fill="#092c24" opacity=".3"/><path d="M66 100h83l-12 49H78Z" fill="#728a60"/><path d="M66 100h83v9H66z" fill="#9aae7b"/><path d="M108 101V39M108 77c-27 1-49-12-48-35 30 0 48 12 48 35Z" stroke="#c4d5a4" stroke-width="1.5"/><path d="M109 62c3-26 23-42 46-39-2 25-21 42-46 39Z" fill="#8fa671"/><path d="M106 78C80 79 58 65 60 42c30 0 48 12 46 36Z" fill="#a1b580"/><path d="m108 62 37-31M106 78 69 48" stroke="#cfddae"/><circle cx="48" cy="111" r="18" fill="#b4bc77"/><circle cx="48" cy="111" r="13" stroke="#d6d99e"/><path d="M48 103v16m-5-11 5 4 5-4m-9 5h8" stroke="#e7e9b9"/><path d="M142 122h30v7h-30zm-5 8h35v7h-35zm0 8h35v7h-35z" fill="#9baf78" stroke="#b8c894"/></svg>`;}
 function homePage(){const rows=monthRows(),t=totals(rows),balance=t.income-t.expense,assetsValue=state.assets.reduce((s,a)=>s+valuation(a),0),budgetPct=Math.round(t.expense/state.budget*100),largest=summarize(rows)[0];return `${heading('把生活，理明白。','记下每一笔花费，也照顾好每一件拥有。',monthPicker())}<div class="intro-grid"><section class="hero"><div class="hero-content"><div class="hero-kicker">${icon('wallet',16)} 本月结余</div><div class="hero-amount"><span>¥</span>${money(balance)}</div><div class="hero-bottom"><div>本月收入<strong>＋ ¥ ${money(t.income)}</strong></div><div>本月支出<strong>－ ¥ ${money(t.expense)}</strong></div></div></div><span class="hero-chip">${rows.length} 笔生活记录</span>${plant()}</section><section class="summary-side"><div><div class="tip-tag">${icon('leaf',16)} 来财生活小观察</div><h2>${largest?`${esc(largest.name)}，<br>是本月花费最多的地方。`:'从第一笔记录，<br>慢慢看清生活的轮廓。'}</h2><p>${largest?`已记录 ¥${money(largest.amount)}。回看这些花费，看看哪些让你觉得值得。`:'不必事事精打细算，先从记录今天的一顿饭开始。'}</p></div><div class="tip-footer"><span class="tiny">基于当前所选月份的账本</span><button class="text-button" data-action="ledger">看看明细 ${icon('arrow',13)}</button></div></section></div><div class="stat-grid">${stat('本月预算剩余',`¥ ${money(state.budget-t.expense,0)}`,`已使用 ${budgetPct}% <button class="text-button" style="padding:0 0 0 5px;font-size:9px" data-action="budget">调整预算</button>`,'wallet')}${stat('当前物品估值',`¥ ${money(assetsValue,0)}`,`${state.assets.filter(a=>!['已售出','已回收'].includes(a.status)).length} 件持有物品 · 按折旧估算`,'box')}${stat('即将到期',`${reminderItems().length} <span style="font-size:13px">项提醒</span>`,'未来30天内的退货 / 保修期限','clock')}</div>${insightPanel()}<div class="grid-two"><section class="panel"><div class="panel-head"><h2>收支的节奏</h2><div class="segmented"><button data-action="chart-week" class="${chartMode==='week'?'active':''}">近7天</button><button data-action="chart-month" class="${chartMode==='month'?'active':''}">本月</button></div></div><div class="chart-key"><span><i></i>支出</span><span><i></i>收入</span></div>${trendChart(rows)}<div class="chart-footer"><span>${chartMode==='week'?'所选月份内最近7天':'所选月份每日收支'} · 单位：元</span><span>每一笔小事，都算数。</span></div></section><section class="panel"><div class="panel-head"><h2>钱都花在哪儿</h2><span class="sub">${month.slice(5)} 月支出</span></div>${categoryChart(rows)}</section></div><div class="grid-two"><section class="panel"><div class="panel-head"><h2>最近的几笔 <span class="sub">生活正在发生</span></h2><button class="text-button" data-action="ledger">全部记录 ${icon('arrow',13)}</button></div>${transactionTable([...rows].sort(sortTx).slice(0,5),false)}</section><section class="panel"><div class="panel-head"><h2>记得照顾你的物品</h2><button class="text-button" data-action="assets">我的物品 ${icon('arrow',13)}</button></div>${renderReminders(2)}<div style="margin-top:12px">${state.assets.filter(a=>!['已售出','已回收'].includes(a.status)).slice(0,2).map(a=>`<div class="asset-mini"><span class="object-icon">${icon(a.emoji,25)}</span><div><strong>${esc(a.name)}</strong><small>${esc(a.status)} · 已陪伴 ${Math.max(0,daysBetween(a.date,today()))} 天</small></div><div class="mini-value">¥ ${money(valuation(a),0)}<small>折旧估值</small></div></div>`).join('')}</div></section></div><div class="notice">${icon('info',15)}<span>初始账目与物品为示例样本。你的修改保存在当前浏览器；行情与快讯来自公开接口，AI 识图需要你在设置里自行配置。</span></div>`;}
 function trendChart(rows){const end=month===today().slice(0,7)?today():`${month}-${new Date(Number(month.slice(0,4)),Number(month.slice(5)),0).getDate()}`;const n=chartMode==='week'?7:Number(end.slice(-2));const dates=Array.from({length:n},(_,i)=>shiftDate(end,i-n+1));const data=dates.map(d=>totals(rows.filter(t=>t.date===d)));const max=Math.max(10000,...data.map(t=>Math.max(t.income,t.expense)));const W=520,H=154,left=42,plot=465,step=plot/n;const ticks=[0,.5,1];return `<div class="trend"><svg role="img" aria-label="每日收入与支出柱状图" viewBox="0 0 ${W} 184" preserveAspectRatio="none">${ticks.map(f=>`<path d="M${left} ${H-125*f}H515" stroke="#edf0e5" stroke-dasharray="3 5"/><text x="0" y="${H-125*f+3}">${Math.round(max*f/100).toLocaleString()}</text>`).join('')}${data.map((t,i)=>{const x=left+i*step+step*.22,w=Math.max(2,Math.min(13,step*.24));return `<g><title>${dates[i]}：支出 ${money(t.expense)} 元，收入 ${money(t.income)} 元</title><rect x="${x}" y="${H-t.expense/max*125}" width="${w}" height="${t.expense/max*125}" rx="2" fill="#497b5c"/><rect x="${x+w+2}" y="${H-t.income/max*125}" width="${w}" height="${t.income/max*125}" rx="2" fill="#d5e4b8"/>${n<=7||i%5===0||i===n-1?`<text text-anchor="middle" x="${left+i*step+step/2}" y="177">${dates[i].slice(5).replace('-','/')}</text>`:''}</g>`;}).join('')}</svg></div>`;}
@@ -1833,8 +2512,8 @@ function transactionTable(rows,actions=true){if(!rows.length)return `<div class=
 function filteredTx(){return monthRows().filter(t=>(!txSearch||`${t.title} ${t.note} ${t.category}`.includes(txSearch))&&(!txCategory||t.category===txCategory)&&(!txType||t.type===txType)).sort(sortTx);}
 function ledgerPage(){const t=totals(monthRows());return `${heading('每一笔，都有去处。','记录小日常，慢慢看见你的消费习惯。',`<button class="button" data-action="export-csv">${icon('download',15)} 导出账本</button>`)}<div class="stat-grid">${stat('本月收入',`¥ ${money(t.income)}`,'用努力，攒下一点底气。','income')}${stat('本月支出',`¥ ${money(t.expense)}`,`${monthRows().filter(t=>t.type==='expense').length} 笔支出记录`,'expense')}${stat('本月结余',`¥ ${money(t.income-t.expense)}`,'收入 − 支出，不代表账户余额','wallet')}</div><div class="toolbar"><label class="search">${icon('search',16)}<input id="tx-search" placeholder="搜索商户、备注或分类" value="${esc(txSearch)}" aria-label="搜索账目"></label><input type="month" id="month-filter" value="${month}" aria-label="账目月份"><select id="type-filter" aria-label="收支类型"><option value="">全部收支</option><option value="expense" ${txType==='expense'?'selected':''}>支出</option><option value="income" ${txType==='income'?'selected':''}>收入</option></select><select id="category-filter" aria-label="交易分类"><option value="">全部分类</option>${categories.map(c=>`<option ${txCategory===c?'selected':''}>${c}</option>`).join('')}</select></div><section class="panel"><div class="panel-head"><h2>我的交易记录</h2><span class="sub" id="tx-count">${filteredTx().length} 笔</span></div><div id="ledger-body">${transactionTable(filteredTx())}</div></section><p class="panel-note">金额单位：人民币。文字记账可用本地规则或 AI 理解；截图可用 AI 识图。所有识别结果都先生成草稿，确认后才入账。</p>`;}
 function filteredAssets(){return state.assets.filter(a=>(!assetSearch||a.name.includes(assetSearch))&&(!assetStatus||a.status===assetStatus));}
-function assetCards(){const rows=filteredAssets();return rows.length?rows.map(a=>{const val=valuation(a);return `<article class="asset-card"><div class="asset-visual ${a.emoji}"><span class="asset-status">${esc(a.status)}</span>${icon(a.emoji,80)}</div><div class="asset-card-body"><h3>${esc(a.name)}</h3><span class="asset-date">购于 ${dateLabel(a.date)}</span><div class="asset-values"><div><small>当前折旧估值</small><strong>¥ ${money(val,0)}</strong></div><div style="text-align:right"><small>购入价格</small><span class="original">¥ ${money(a.price,0)}</span></div></div><div class="progress"><span style="width:${Math.max(0,Math.min(100,val/a.price*100))}%"></span></div><p class="asset-info">${a.resale?`手动参考价 ¥${money(a.resale,0)} · 非平台报价`:`预计使用 ${a.life} 年 · 残值 ¥${money(a.residual,0)}`}</p><div class="asset-footer"><span>${a.txId?'已关联消费记录':'独立物品记录'}</span><button class="text-button" data-action="asset-market" data-id="${esc(a.id)}">行情 ${icon('market',12)}</button><button class="text-button" data-action="edit-asset" data-id="${esc(a.id)}">管理物品 ${icon('arrow',12)}</button></div></div></article>`;}).join(''):`<div class="panel empty" style="grid-column:1/-1">${icon('box',32)}这里还没有物品。把值得照顾的东西记下来吧。<br><button class="text-button" data-action="add-asset">＋ 添加物品</button></div>`;}
-function assetsPage(){return `${heading('拥有的，也值得照顾。','从买下的那一天，到下一次转手，陪你管理物品的每一程。',`<button class="button" data-action="add-asset">${icon('plus',15)} 添加物品</button>`)}<div class="stat-grid">${stat('当前物品估值',`¥ ${money(state.assets.reduce((s,a)=>s+valuation(a),0),0)}`,'透明直线折旧，非二手平台报价','box')}${stat('闲置物品',`${state.assets.filter(a=>a.status==='闲置').length} <span style="font-size:13px">件</span>`,'用不到的，也许值得一个新去处。','leaf')}${stat('到期提醒',`${reminderItems().length} <span style="font-size:13px">项</span>`,'未来30天内的退货与保修','clock')}</div>${reminderItems().length?`<section style="margin-bottom:23px">${renderReminders(2)}</section>`:''}<div class="toolbar"><label class="search">${icon('search',16)}<input id="asset-search" value="${esc(assetSearch)}" placeholder="搜索我的物品" aria-label="搜索物品"></label><select id="asset-status" aria-label="筛选物品状态"><option value="">全部状态</option>${['使用中','待退货','闲置','已售出','已回收'].map(s=>`<option ${assetStatus===s?'selected':''}>${s}</option>`).join('')}</select><button class="text-button" data-action="depreciation">${icon('info',14)} 估值怎么算</button></div><div class="asset-grid" id="asset-grid">${assetCards()}</div><div class="notice" style="margin-top:23px">${icon('leaf',16)}<span>闲置不等于没有价值。可以先检查成色、整理配件，再参考真实二手成交信息决定是否转售。来财暂未接入二手平台。</span></div>${resalePanel()}`;}
+function assetCards(){return assetCardsV2();}
+function assetsPage(){return assetsPageV2();}
 
 const news=[{sector:'宽基指数',title:'读懂指数波动，先看清你持有的是什么',text:'示例摘要：宽基指数分散覆盖多家公司，但仍会受到市场整体波动影响。观察短期涨跌之外，也可以关注资金使用期限、风险承受能力和组合集中度。',kind:'市场知识',tab:'all'},{sector:'贵金属',title:'黄金的价格，并不只由一种因素决定',text:'示例摘要：利率、汇率、市场预期等因素可能共同影响黄金价格。首饰价格还包含工费与渠道成本，不能直接等同于投资金价。',kind:'资产观察',tab:'all'},{sector:'科技',title:'行业消息很多，如何找到与你有关的部分？',text:'示例摘要：先确认基金实际持仓与行业权重，再判断一则行业消息是否相关。名称相似的基金，也可能有不同的投资范围。',kind:'阅读方法',tab:'all'},{sector:'宽基指数',title:'关注相关板块，也关注组合里的重复持仓',text:'关联板块阅读示例：多只基金可能持有相似标的。可以汇总底层资产的行业权重，识别表面分散、实际集中的情况。',kind:'自选关联示例',tab:'related'}];
 function marketPage(){
@@ -2421,14 +3100,14 @@ function txModal(mode='manual',id=''){recognition?.stop();recognition=null;modal
   ? `AI 能处理 AA、均摊、“三个人一共三百”、上周五这类口语；本地规则只认“28元”这种写法。`
   : `本地规则只认“28元”“¥28”这类写法。<button class="text-button" data-action="vision-settings">配置 AI</button> 后可以说“和朋友吃饭一共300，AA”。`}</p><div id="parse-results"></div>`;if(mode==='image')content=imageModalBody();openModal(id?'修改这笔记录':'记下生活的一笔',id?'修改账目不会自动改变已关联物品的购入价格。':'先核对，再入账。每一笔，都由你确认。',tabs+content);}
 function readTx(form){const f=new FormData(form),title=String(f.get('title')||'').trim(),date=String(f.get('date')||'');if(!title)throw Error('请填写交易名称');if(!/^\d{4}-\d{2}-\d{2}$/.test(date))throw Error('请选择交易日期');const category=String(f.get('category')||'');return {title,amount:toCents(f.get('amount')),date,category,type:String(f.get('type')),note:String(f.get('note')||'').trim()};}
-function assetModal(id='',tx=null){const a=state.assets.find(a=>a.id===id)||{name:tx?.title||'',category:tx?.category||'数码家电',emoji:'box',price:tx?.amount||'',date:tx?.date||today(),life:3,residual:0,returnDate:'',warrantyDate:'',status:'使用中',txId:tx?.id||'',note:'',resale:null};openModal(id?'照顾这件物品':'把拥有的，好好记下来','添加物品不会产生新支出。退货与保修期限以商家承诺为准。',`<form id="asset-form" data-id="${esc(id)}" data-tx="${esc(a.txId)}"><div class="form-grid">${field('物品名称',`<input name="name" maxlength="60" value="${esc(a.name)}" required placeholder="例如：我的无线耳机">`,true)}${field('购买价格（人民币）',`<input name="price" type="number" step="0.01" min="0.01" required value="${a.price?a.price/100:''}">`)}${field('购买日期',`<input name="date" type="date" required max="${today()}" value="${a.date}">`)}${field('物品分类',`<select name="category">${categoryOptions(a.category)}</select>`)}${field('当前状态',`<select name="status">${['使用中','待退货','闲置','已售出','已回收'].map(s=>`<option ${a.status===s?'selected':''}>${s}</option>`).join('')}</select>`)}${field('预计使用年限',`<input name="life" type="number" min="0.5" max="100" step="0.5" required value="${a.life}">`)}${field('预计残值（元）',`<input name="residual" type="number" min="0" step="0.01" required value="${a.residual/100}">`)}${field('退货截止日（选填）',`<input name="returnDate" type="date" value="${a.returnDate}">`)}${field('保修截止日（选填）',`<input name="warrantyDate" type="date" value="${a.warrantyDate}">`)}${field('二手参考价（选填）',`<input name="resale" type="number" min="0" step="0.01" placeholder="手动填写，非平台报价" value="${a.resale===null?'':a.resale/100}">`)}${field('展示图标',`<select name="emoji">${[['box','物品'],['headphones','耳机'],['laptop','电脑'],['camera','相机'],['bag','包袋'],['book','书籍']].map(([v,l])=>`<option value="${v}" ${a.emoji===v?'selected':''}>${l}</option>`).join('')}</select>`)}${field('备注',`<input name="note" maxlength="160" value="${esc(a.note)}" placeholder="成色、配件或使用情况">`,true)}</div><div class="form-error" id="form-error" role="alert"></div><div class="form-actions">${id?`<button type="button" class="button danger" data-action="delete-asset" data-id="${esc(id)}">删除物品</button>`:''}<button type="button" class="button" data-action="close">取消</button><button class="button primary" type="submit">保存物品</button></div></form>`,true);}
+function assetModal(id='',tx=null){const a=state.assets.find(a=>a.id===id)||{name:tx?.title||'',category:tx?.category||'数码家电',emoji:'box',price:tx?.amount||'',date:tx?.date||today(),life:3,residual:0,returnDate:'',warrantyDate:'',status:'使用中',txId:tx?.id||'',note:'',resale:null};openModal(id?'照顾这件物品':'把拥有的，好好记下来','添加物品不会产生新支出。退货与保修期限以商家承诺为准。',`<form id="asset-form" data-id="${esc(id)}" data-tx="${esc(a.txId)}"><div class="form-grid">${field('物品名称',`<input name="name" maxlength="60" value="${esc(a.name)}" required placeholder="例如：AirPods Pro 2"><span class="field-hint">建议写清品牌与型号，行情查询会按它匹配</span>`,true)}${field('购买价格（人民币）',`<input name="price" type="number" step="0.01" min="0.01" required value="${a.price?a.price/100:''}">`)}${field('购买日期',`<input name="date" type="date" required max="${today()}" value="${a.date}">`)}${field('物品分类',`<select name="category">${categoryOptions(a.category)}</select>`)}${field('当前状态',`<select name="status">${['使用中','待退货','闲置','已售出','已回收'].map(s=>`<option ${a.status===s?'selected':''}>${s}</option>`).join('')}</select>`)}${field('预计使用年限',`<input name="life" type="number" min="0.5" max="100" step="0.5" required value="${a.life}">`)}${field('预计残值（元）',`<input name="residual" type="number" min="0" step="0.01" required value="${a.residual/100}">`)}${field('退货截止日（选填）',`<input name="returnDate" type="date" value="${a.returnDate}">`)}${field('保修截止日（选填）',`<input name="warrantyDate" type="date" value="${a.warrantyDate}">`)}${field('二手参考价（选填）',`<input name="resale" type="number" min="0" step="0.01" placeholder="手动填写，非平台报价" value="${a.resale===null?'':a.resale/100}">`)}${field('展示图标',`<select name="emoji">${[['box','物品'],['headphones','耳机'],['laptop','电脑'],['camera','相机'],['bag','包袋'],['book','书籍']].map(([v,l])=>`<option value="${v}" ${a.emoji===v?'selected':''}>${l}</option>`).join('')}</select>`)}${field('备注',`<input name="note" maxlength="160" value="${esc(a.note)}" placeholder="成色、配件或使用情况">`,true)}</div><div class="form-error" id="form-error" role="alert"></div><div class="form-actions">${id?`<button type="button" class="button danger" data-action="delete-asset" data-id="${esc(id)}">删除物品</button>`:''}<button type="button" class="button" data-action="close">取消</button><button class="button primary" type="submit">保存物品</button></div></form>`,true);}
 function budgetModal(){openModal('给花费一个温柔的边界','预算用于对照每月支出，不代表实际账户余额。',`<form id="budget-form"><label class="field">每月预算（人民币）<input name="budget" inputmode="decimal" type="number" min="0.01" step="0.01" value="${state.budget/100}" required></label><div class="form-error" id="form-error" role="alert"></div><div class="form-actions"><button class="button" type="button" data-action="close">取消</button><button class="button primary" type="submit">保存预算</button></div></form>`);}
 function confirmModal(title,description,action,id=''){openModal(title,'操作前，请确认你想保留的数据。',`<p class="confirm-details">${esc(description)}</p><div class="form-actions"><button class="button" data-action="close">取消</button><button class="button danger" data-action="${action}" data-id="${esc(id)}">确认${action==='confirm-reset'?'重置':'删除'}</button></div>`);}
 function download(name,content,type){const url=URL.createObjectURL(new Blob([content],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);toast('已生成导出文件');}
 function exportCSV(){const cell=v=>'"'+String(v).replace(/^[=+@\-\t\r]/,"'$&").replaceAll('"','""')+'"';const rows=[['日期','交易名称','收支类型','分类','金额（元）','币种','备注'],...[...state.transactions].sort(sortTx).map(t=>[t.date,t.title,t.type==='income'?'收入':'支出',t.category,(t.amount/100).toFixed(2),'CNY',t.note])];download(`来财账本-${today()}.csv`,'\uFEFF'+rows.map(r=>r.map(cell).join(',')).join('\r\n'),'text/csv;charset=utf-8');}
 function parseAndRender(){try{const text=$('#natural-text').value;parsed=parseText(text);if(!parsed.length){$('#parse-results').innerHTML='<div class="notice amber" style="margin-top:20px">没有找到可确认的记录。试试“午饭28元，打车35元”，也可切换手动输入。</div>';return;}$('#parse-results').innerHTML=draftForm(parsed,'本地规则 · 非 AI',`已生成 ${parsed.length} 条草稿。规则可能遗漏信息，请核对原文和金额；无法解析的部分不会入账。`);}catch(e){toast(e.message);}}
 function startVoice(){if(recognition){recognition.stop();recognition=null;return;}const Speech=window.SpeechRecognition||window.webkitSpeechRecognition;if(!Speech){$('#voice-hint').textContent='当前浏览器不支持语音输入，请在下方直接输入文字。';return;}try{recognition=new Speech();recognition.lang='zh-CN';recognition.interimResults=false;recognition.continuous=false;recognition.onstart=()=>{$('.voice-button')?.classList.add('listening');if($('#voice-hint'))$('#voice-hint').textContent='正在聆听…再点一次停止';};recognition.onresult=e=>{if($('#natural-text'))$('#natural-text').value+=e.results[0][0].transcript;};recognition.onerror=e=>{if($('#voice-hint'))$('#voice-hint').textContent=e.error==='not-allowed'?'麦克风权限未获准，请使用文字输入。':'语音服务暂不可用，请直接输入文字。';};recognition.onend=()=>{recognition=null;$('.voice-button')?.classList.remove('listening');if($('#voice-hint')?.textContent.includes('聆听'))$('#voice-hint').textContent='录音结束，请核对文字并生成待确认记录';};recognition.start();}catch{recognition=null;toast('语音服务不可用，可以直接输入文字');}}
-document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'market-listing-copy':copyListingText();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
+document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'asset-detail':openAssetDetail(id,b.dataset.tab);break;case 'asset-report':generateAssetReport();break;case 'asset-listings':generateAssetListings();break;case 'asset-copy':copyAssetListing(b.dataset.style);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'market-listing-copy':copyListingText();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
 case 'account':openAccountEntry();break;
 case 'login':loginModal();break;
 case 'send-code':doSendCode();break;

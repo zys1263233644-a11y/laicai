@@ -148,6 +148,15 @@
 
 .range-wide{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:999px;background:#fdf3e4;color:#a4763c;font-size:10px;font-weight:400;vertical-align:middle}
 
+.model-box{margin-bottom:14px}
+.model-field{width:100%}
+.model-row{display:flex;gap:8px;align-items:center;margin-top:6px}
+.model-row input{flex:1}
+.model-status{display:block;font-size:11px;color:#8d997d;margin-top:8px}
+.model-status.error{color:#b07a5b}
+.model-candidates{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.model-option{display:flex;align-items:center;gap:6px;font-size:12px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px 10px;cursor:pointer}
+
 </style>
 </head>
 <body>
@@ -1124,6 +1133,26 @@ function toYuan(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+/**
+ * 从关键词和平台匹配到的型号名里提取“代际/版本”特征词，用来剔除同系列其他代。
+ * 例：airpods pro 二代 → ['二代']；AirPods Pro 2 → ['二代','2']；USB-C → ['USB-C']
+ */
+function modelTokens(keyword, modelDesc) {
+  const text = String(keyword || '') + ' ' + String(modelDesc || '');
+  const out = new Set();
+  const gen = text.match(/第?([一二三四1-4])代/g) || [];
+  const cn = {'一': '一代', '1': '一代', '二': '二代', '2': '二代', '三': '三代', '3': '三代', '四': '四代', '4': '四代'};
+  for (const g of gen) {
+    const key = g.replace('第', '').replace('代', '');
+    if (cn[key]) out.add(cn[key]);
+  }
+  const standalone = text.match(/\b([234])\b/g) || [];
+  for (const n of standalone) if (cn[n.trim()]) out.add(cn[n.trim()]);
+  const ver = text.match(/USB-?C|Lightning|Type-?C/gi) || [];
+  for (const v of ver) out.add(v.toUpperCase().replace('-', '-'));
+  return [...out];
+}
+
 /** 成色码 → 档位：99A→99，95B→95，9A→90，8B→80，7C→70 */
 function conditionBucket(code) {
   const s = String(code || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
@@ -1287,10 +1316,20 @@ function buildSnapshot(input) {
 
   const stage1 = pool;
 
+  // 型号代际过滤：关键词写明“二代”时，剔除同系列的一代/三代
+  const tokens = modelTokens(keyword, deal.modelDesc);
+  let modelKept = stage1;
+  let modelApplied = false;
+  let modelDropped = 0;
+  if (tokens.length) {
+    const hit = stage1.filter(x => tokens.some(t => String(x.title).toUpperCase().includes(String(t).toUpperCase())));
+    if (hit.length >= 8) { modelKept = hit; modelApplied = true; modelDropped = stage1.length - hit.length; }
+  }
+
   const target = String(targetCondition || '');
-  const same = target ? stage1.filter(x => x.bucket === target) : [];
+  const same = target ? modelKept.filter(x => x.bucket === target) : [];
   const usedSubset = same.length >= 8;
-  const basis = usedSubset ? same : stage1;
+  const basis = usedSubset ? same : modelKept;
 
   const weights = basis.map(x => {
     if (!target || !x.bucket) return 1;
@@ -1336,6 +1375,7 @@ function buildSnapshot(input) {
       sample: basis.slice(0, 5)
     },
     subset: {condition: usedSubset ? target : '', count: same.length, used: usedSubset, requested: target},
+    modelFilter: {applied: modelApplied, tokens, dropped: modelDropped},
     calibration: {delta, askMedian: stats.median, dealMid}
   };
 }
@@ -1943,6 +1983,8 @@ function buildReportPrompt(asset, ctx = {}) {
     '样本与统计：',
     '原始 ' + (listingInfo.rawCount || 0) + ' 条，剔除 ' + (listingInfo.removed || 0) + ' 条，进入统计 ' + (listingInfo.count || 0) + ' 条',
     '同成色筛选：' + (sub.used ? ('已启用，' + (sub.count || 0) + ' 条') : '未启用'),
+    (snap.recognized && snap.recognized.name ? ('识别型号：' + snap.recognized.name + (snap.recognized.level === 'LOW' || snap.recognized.level === 'UNKNOWN' ? '（匹配置信度偏低）' : '')) : '识别型号：未识别'),
+    (snap.modelFilter && snap.modelFilter.applied ? ('型号筛选：已按「' + (snap.modelFilter.tokens || []).join('、') + '」过滤，剔除 ' + (snap.modelFilter.dropped || 0) + ' 条同系列其他型号') : '型号筛选：未启用'),
     '价格分位（仅用于说明挂牌价依据）：P25 ' + (d.p25 == null ? '未知' : d.p25) + '，P50 ' + (d.p50 == null ? '未知' : d.p50) + '，P75 ' + (d.p75 == null ? '未知' : d.p75),
     '价格区间（四分位距法）：' + (price.range && price.range.min != null ? price.range.min + ' - ' + price.range.max : '未知') + ' 元',
     '样本平均价：' + (price.meanCI && price.meanCI.mean != null ? price.meanCI.mean : '未知') + ' 元',
@@ -2277,16 +2319,15 @@ function rangeCell(a) {
     return '<button class="range-retry" data-action="asset-range-retry" data-id="' + esc(a.id) + '">' + label + '</button>';
   }
   if (r.status === 'ok' && r.data && r.data.min != null && r.data.max != null) {
-    const wide = r.data.max > 0 && (r.data.max - r.data.min) / r.data.max >= 0.5;
-    return '¥' + r.data.min + '–¥' + r.data.max + (wide ? '<span class="range-wide">区间宽</span>' : '');
+    return '¥' + r.data.min + '–¥' + r.data.max;
   }
   return '<span class="range-empty">—</span>';
 }
 
 /** lite=卡片用（2 页快）；full=子页用（5 页准） */
-function fetchAssetRange(asset, full) {
+function fetchAssetRange(asset, full, keyword) {
   const url = apiBase()
-    + '/api/zz/market?keyword=' + encodeURIComponent(asset.name)
+    + '/api/zz/market?keyword=' + encodeURIComponent(keyword || asset.name)
     + '&condition=95' + (full ? '' : '&lite=1');
   return fetch(url)
     .then(r => r.json())
@@ -2460,7 +2501,9 @@ function openAssetDetail(id) {
   const warranty = !!(a.warrantyDate && a.warrantyDate >= today());
   assetDetail = {
     id,
-    form: {ageMonths: monthsSince(a.date), condition: '95', warranty, fullBox: false, functional: true, urgency: 'normal'},
+    form: {ageMonths: monthsSince(a.date), condition: '95', warranty, fullBox: false, functional: true, urgency: 'normal', keyword: a.name},
+    recognize: null,
+    chosen: '',
     snapshot: null,
     price: null,
     hold: null,
@@ -2481,6 +2524,7 @@ function assetDetailMarkup() {
   const f = d.form;
   return '<div class="detail-body">'
     + '<section class="detail-form">'
+    + '<div class="model-box" id="asset-model-box">' + modelBoxMarkup() + '</div>'
     + '<div class="urgency-group"><span>是否着急出售</span>'
     + URGENCY_OPTIONS.map(o => '<label><input type="radio" name="urgency" data-detail-urgency value="' + o.id + '"' + (f.urgency === o.id ? ' checked' : '') + '> ' + o.label + '</label>').join('')
     + '</div>'
@@ -2501,6 +2545,54 @@ function assetDetailMarkup() {
     + '</section>'
     + '<div id="asset-detail-panel">' + assetDetailPanel() + '</div>'
     + '</div>';
+}
+
+function modelBoxMarkup() {
+  const d = assetDetail;
+  if (!d) return '';
+  const rec = d.recognize || {};
+  const list = rec.candidates || [];
+  const selected = d.chosen || rec.name || '';
+  const rows = list.map(m => {
+    const checked = m.modelName === selected ? ' checked' : '';
+    return '<label class="model-option"><input type="radio" name="model-pick" data-model-pick value="' + esc(m.modelName) + '"' + checked + '> ' + esc(m.modelName) + '</label>';
+  }).join('');
+  const status = rec.loading
+    ? '<span class="model-status">识别中…</span>'
+    : (rec.error ? '<span class="model-status error">' + esc(rec.error) + '</span>'
+      : (rec.name ? '<span class="model-status">识别结果：' + esc(rec.name) + (rec.level === 'LOW' || rec.level === 'UNKNOWN' ? '（置信度偏低）' : '') + '</span>'
+        : '<span class="model-status">填好名称后可点“识别型号”，让系统按规范型号查行情</span>'));
+  return '<label class="field model-field">物品名称 / 型号'
+    + '<span class="model-row"><input id="asset-model-input" maxlength="60" value="' + esc(d.form.keyword || '') + '" placeholder="例如 AirPods Pro 二代" data-detail-field="keyword">'
+    + '<button class="button" data-action="asset-recognize">识别型号</button></span></label>'
+    + status
+    + (rows ? '<div class="model-candidates">' + rows + '</div>' : '');
+}
+
+function renderModelBox() {
+  const box = $('#asset-model-box');
+  if (box) box.innerHTML = modelBoxMarkup();
+}
+
+async function recognizeAssetModel() {
+  const d = assetDetail;
+  if (!d) return;
+  const keyword = String(d.form.keyword || '').trim();
+  if (!keyword) { toast('请先填写物品名称或型号'); return; }
+  d.recognize = {loading: true, name: '', candidates: [], error: '', level: ''};
+  renderModelBox();
+  try {
+    const res = await fetch(apiBase() + '/api/zz/recognize?keyword=' + encodeURIComponent(keyword));
+    const body = await res.json();
+    if (!body.ok) throw Error(body.error || '识别失败');
+    const data = body.data || {};
+    d.recognize = {loading: false, name: data.name || '', candidates: data.candidates || [], error: '', level: data.level || ''};
+    d.chosen = data.name || '';
+    renderModelBox();
+  } catch (err) {
+    d.recognize = {loading: false, name: '', candidates: [], error: (err && err.message) || '识别失败', level: ''};
+    renderModelBox();
+  }
 }
 
 function reportSectionMarkup(title, sec, chip) {
@@ -2564,12 +2656,13 @@ function renderAssetDetail() {
   if (btn) btn.textContent = assetDetail && assetDetail.loading ? '生成中…' : '生成转卖建议 & 转卖文案';
 }
 
-function detailSnapshot(a, condition) {
+function detailSnapshot(a, condition, keyword) {
+  const useCache = !keyword || keyword === a.name;
   const cached = assetRanges[a.id];
-  if (cached && cached.status === 'ok' && cached.data && snapshotUsable(cached.data.snapshot)) {
+  if (useCache && cached && cached.status === 'ok' && cached.data && snapshotUsable(cached.data.snapshot)) {
     return Promise.resolve(cached.data.snapshot);
   }
-  return fetchAssetRange(a, true).then(r => r.snapshot);
+  return fetchAssetRange(a, true, keyword).then(r => r.snapshot);
 }
 
 /** 模型写的 headline 必须包含真实区间的两个数字，否则用区间重写 */
@@ -2595,7 +2688,8 @@ async function generateAssetAll() {
   d.listingError = '';
   renderAssetDetail();
   try {
-    const snap = await detailSnapshot(a, d.form.condition);
+    const keyword = d.chosen || d.form.keyword || a.name;
+    const snap = await detailSnapshot(a, d.form.condition, keyword);
     const price = estimatePrice(snap, {
       condition: d.form.condition,
       ageMonths: Number(d.form.ageMonths) || 0,
@@ -2606,7 +2700,7 @@ async function generateAssetAll() {
     });
     if (!price.ok) throw Error(price.reason || '没有可用的市场样本');
     const hold = holdingStats(a, price.recommended);
-    const payload = await chatJson(buildReportMessages(a, {features: d.form, price, snapshot: snap, hold, condition: d.form.condition}), visionTuning(visionCfg, {long: true}));
+    const payload = await chatJson(buildReportMessages({...a, name: keyword}, {features: d.form, price, snapshot: snap, hold, condition: d.form.condition}), visionTuning(visionCfg, {long: true}));
     const rep = alignHeadline(normalizeReport(payload, reportAllowedNumbers(price, hold, snap)), price);
     if (!rep.ok) throw Error(rep.reason || '报告生成失败');
     d.snapshot = snap;
@@ -2648,10 +2742,16 @@ function copyAssetListing(style) {
 
 document.addEventListener('change', e => {
   if (!assetDetail) return;
+  const pick = e.target.closest('[data-model-pick]');
+  if (pick) { assetDetail.chosen = pick.value; renderModelBox(); return; }
   const u = e.target.closest('[data-detail-urgency]');
   if (u) { assetDetail.form.urgency = u.value; return; }
   const f = e.target.closest('[data-detail-field]');
-  if (f) { assetDetail.form[f.dataset.detailField] = f.type === 'number' ? Number(f.value) : f.value; return; }
+  if (f) {
+    assetDetail.form[f.dataset.detailField] = f.type === 'number' ? Number(f.value) : f.value;
+    if (f.dataset.detailField === 'keyword') { assetDetail.chosen = ''; assetDetail.recognize = null; renderModelBox(); }
+    return;
+  }
   const c = e.target.closest('[data-detail-flag]');
   if (c) { assetDetail.form[c.dataset.detailFlag] = c.checked; return; }
 });
@@ -3299,7 +3399,7 @@ function download(name,content,type){const url=URL.createObjectURL(new Blob([con
 function exportCSV(){const cell=v=>'"'+String(v).replace(/^[=+@\-\t\r]/,"'$&").replaceAll('"','""')+'"';const rows=[['日期','交易名称','收支类型','分类','金额（元）','币种','备注'],...[...state.transactions].sort(sortTx).map(t=>[t.date,t.title,t.type==='income'?'收入':'支出',t.category,(t.amount/100).toFixed(2),'CNY',t.note])];download(`来财账本-${today()}.csv`,'\uFEFF'+rows.map(r=>r.map(cell).join(',')).join('\r\n'),'text/csv;charset=utf-8');}
 function parseAndRender(){try{const text=$('#natural-text').value;parsed=parseText(text);if(!parsed.length){$('#parse-results').innerHTML='<div class="notice amber" style="margin-top:20px">没有找到可确认的记录。试试“午饭28元，打车35元”，也可切换手动输入。</div>';return;}$('#parse-results').innerHTML=draftForm(parsed,'本地规则 · 非 AI',`已生成 ${parsed.length} 条草稿。规则可能遗漏信息，请核对原文和金额；无法解析的部分不会入账。`);}catch(e){toast(e.message);}}
 function startVoice(){if(recognition){recognition.stop();recognition=null;return;}const Speech=window.SpeechRecognition||window.webkitSpeechRecognition;if(!Speech){$('#voice-hint').textContent='当前浏览器不支持语音输入，请在下方直接输入文字。';return;}try{recognition=new Speech();recognition.lang='zh-CN';recognition.interimResults=false;recognition.continuous=false;recognition.onstart=()=>{$('.voice-button')?.classList.add('listening');if($('#voice-hint'))$('#voice-hint').textContent='正在聆听…再点一次停止';};recognition.onresult=e=>{if($('#natural-text'))$('#natural-text').value+=e.results[0][0].transcript;};recognition.onerror=e=>{if($('#voice-hint'))$('#voice-hint').textContent=e.error==='not-allowed'?'麦克风权限未获准，请使用文字输入。':'语音服务暂不可用，请直接输入文字。';};recognition.onend=()=>{recognition=null;$('.voice-button')?.classList.remove('listening');if($('#voice-hint')?.textContent.includes('聆听'))$('#voice-hint').textContent='录音结束，请核对文字并生成待确认记录';};recognition.start();}catch{recognition=null;toast('语音服务不可用，可以直接输入文字');}}
-document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'asset-detail':openAssetDetail(id,b.dataset.tab);break;case 'asset-generate':generateAssetAll();break;case 'asset-range-retry':retryAssetRange(id);break;case 'asset-copy':copyAssetListing(b.dataset.style);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'market-listing-copy':copyListingText();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
+document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id;switch(action){case 'close':closeModal();break;case 'add-tx':txModal();break;case 'edit-tx':txModal('manual',id);break;case 'add-asset':assetModal();break;case 'edit-asset':assetModal(id);break;case 'asset-market':openAssetMarket(id);break;case 'asset-detail':openAssetDetail(id,b.dataset.tab);break;case 'asset-generate':generateAssetAll();break;case 'asset-recognize':recognizeAssetModel();break;case 'asset-range-retry':retryAssetRange(id);break;case 'asset-copy':copyAssetListing(b.dataset.style);break;case 'market-query':queryMarket();break;case 'market-advice':askResaleAdvice();break;case 'market-listing-copy':copyListingText();break;case 'settings':case 'ledger':case 'assets':location.hash=action;break;case 'budget':budgetModal();break;case 'month-prev':case 'month-next':{const [y,m]=month.split('-').map(Number);const d=new Date(Date.UTC(y,m-1+(action==='month-prev'?-1:1),1));month=d.toISOString().slice(0,7);render();break;}case 'chart-week':chartMode='week';render();break;case 'chart-month':chartMode='month';render();break;case 'reminders':openModal('一些值得记住的小事','未来30天内的退货与保修期限。仅站内提醒，不会发送通知。',renderReminders());break;case 'depreciation':openModal('估值，算给你看','这是帮助整理物品的估算，不是市场报价。',`<div class="value-explanation">当前估值 = 购买价 −（购买价 − 预计残值）× 已使用天数 ÷（使用年限 × 365）<br><br>估值最低为残值，不因未来购买日期增加；已售出和已回收物品不计入当前持有估值。<br><br>手动二手参考价独立展示，不改变折旧估值。实际成交价取决于成色、供需和平台情况。</div>`);break;case 'parse-text':parseAndRender();break;case 'parse-ai':parseWithAI();break;case 'voice-start':startVoice();break;case 'export-csv':exportCSV();break;case 'export-json':download(`来财备份-${today()}.json`,JSON.stringify(state,null,2),'application/json');break;case 'reset':confirmModal('重新开始示例体验？','这会覆盖当前浏览器内的全部账目、物品、预算和自选设置。建议先在设置页导出备份。','confirm-reset');break;case 'confirm-reset':state=seed();persist();closeModal();render();toast('已恢复示例数据');break;case 'delete-tx':confirmModal('删除这笔记录？','账本与统计会同步更新。已关联物品会保留，原交易关联将解除。','confirm-delete-tx',id);break;case 'confirm-delete-tx':state.transactions=state.transactions.filter(t=>t.id!==id);state.assets.forEach(a=>{if(a.txId===id)a.txId='';});persist();closeModal();render();toast('记录已删除');break;case 'delete-asset':confirmModal('删除这件物品？','物品与提醒会删除，关联的原始消费记录会保留。','confirm-delete-asset',id);break;case 'confirm-delete-asset':state.assets=state.assets.filter(a=>a.id!==id);persist();closeModal();render();toast('物品已删除');break;case 'news-live':newsTab='live';render();break;case 'news-related':newsTab='related';render();break;case 'news-knowledge':newsTab='knowledge';render();break;
 case 'account':openAccountEntry();break;
 case 'login':loginModal();break;
 case 'send-code':doSendCode();break;

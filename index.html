@@ -2557,11 +2557,13 @@ function modelBoxMarkup() {
     const checked = m.modelName === selected ? ' checked' : '';
     return '<label class="model-option"><input type="radio" name="model-pick" data-model-pick value="' + esc(m.modelName) + '"' + checked + '> ' + esc(m.modelName) + '</label>';
   }).join('');
-  const status = rec.loading
-    ? '<span class="model-status">识别中…</span>'
-    : (rec.error ? '<span class="model-status error">' + esc(rec.error) + '</span>'
-      : (rec.name ? '<span class="model-status">识别结果：' + esc(rec.name) + (rec.level === 'LOW' || rec.level === 'UNKNOWN' ? '（置信度偏低）' : '') + '</span>'
-        : '<span class="model-status">填好名称后可点“识别型号”，让系统按规范型号查行情</span>'));
+  let status;
+  if (rec.loading) status = '<span class="model-status">识别中…</span>';
+  else if (rec.error === 'throttled') status = '<span class="model-status error">转转接口限流，暂时无法识别；可直接按关键词查行情</span>';
+  else if (rec.error === 'failed') status = '<span class="model-status error">识别失败：' + esc(rec.message || '接口异常') + '；可直接按关键词查行情</span>';
+  else if (rec.name) status = '<span class="model-status">识别结果：' + esc(rec.name) + (rec.level === 'LOW' || rec.level === 'UNKNOWN' ? '（置信度偏低）' : '') + '</span>';
+  else if (rec.done) status = '<span class="model-status error">未识别到型号，建议写清品牌 + 型号 + 容量，例如「AirPods Pro 2 USB-C」</span>';
+  else status = '<span class="model-status">填好名称后可点“识别型号”，让系统按规范型号查行情</span>';
   return '<label class="field model-field">物品名称 / 型号'
     + '<span class="model-row"><input id="asset-model-input" maxlength="60" value="' + esc(d.form.keyword || '') + '" placeholder="例如 AirPods Pro 二代" data-detail-field="keyword">'
     + '<button class="button" data-action="asset-recognize">识别型号</button></span></label>'
@@ -2586,11 +2588,11 @@ async function recognizeAssetModel() {
     const body = await res.json();
     if (!body.ok) throw Error(body.error || '识别失败');
     const data = body.data || {};
-    d.recognize = {loading: false, name: data.name || '', candidates: data.candidates || [], error: '', level: data.level || ''};
+    d.recognize = {loading: false, done: true, name: data.name || '', candidates: data.candidates || [], error: data.error || '', message: data.message || '', level: data.level || ''};
     d.chosen = data.name || '';
     renderModelBox();
   } catch (err) {
-    d.recognize = {loading: false, name: '', candidates: [], error: (err && err.message) || '识别失败', level: ''};
+    d.recognize = {loading: false, done: true, name: '', candidates: [], error: 'failed', message: (err && err.message) || '识别失败', level: ''};
     renderModelBox();
   }
 }
